@@ -1,0 +1,144 @@
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-1.0.x"]
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// BANCO COMBATARMS_LOG (Sistema de Ranked)
+// ============================================
+
+model BST_RankedMatch {
+  id                       String                   @id @default(uuid())
+  lobbyId                  String
+  gameMode                 String                   // "ranked"
+  map                      String
+  maxPlayers               Int                      @default(10)
+  roundTime                Int?
+  maxRounds                Int?
+  autoBalance              Boolean                  @default(true)
+  serverIp                 String?
+  
+  // HOST System
+  hostOidUser              Int?
+  hostAttempts             Int                      @default(0)
+  roomId                   Int?                     // ID da sala (1-9999)
+  mapNumber                Int?                     // MapNo para validação
+  
+  // Timestamps
+  startedAt                DateTime
+  endedAt                  DateTime?
+  duration                 Int?                     // segundos
+  
+  // Resultado
+  winnerId                 Int?
+  winnerTeam               String?                  // "ALPHA" ou "BRAVO"
+  scoreAlpha               Int                      @default(0)
+  scoreBravo               Int                      @default(0)
+  endReason                String?                  // completed, cancelled, timeout
+  status                   String                   @default("awaiting-ready") // awaiting-ready, in-progress, awaiting-confirmation, completed, cancelled
+  
+  // Confirmação
+  confirmationTimeout      DateTime?
+  
+  createdAt                DateTime                 @default(now())
+  
+  // Relations
+  players                  BST_MatchPlayer[]
+  
+  @@map("BST_RankedMatch")
+  @@index([startedAt])
+  @@index([status])
+  @@index([gameMode])
+}
+
+model BST_MatchPlayer {
+  id                       Int                      @id @default(autoincrement())
+  matchId                  String
+  oidUser                  Int
+  team                     String?                  // "ALPHA" ou "BRAVO"
+  
+  // Ready System
+  readyStatus              String                   @default("PENDING") // PENDING, READY, DECLINED
+  
+  // Stats da partida (preenchido após logs)
+  kills                    Int                      @default(0)
+  deaths                   Int                      @default(0)
+  assists                  Int                      @default(0)
+  headshots                Int                      @default(0)
+  
+  // Confirmação
+  confirmedResult          Boolean                  @default(false)
+  confirmedAt              DateTime?
+  mmrChange                Int?                     // +25, -20, etc
+  
+  // Relations
+  match                    BST_RankedMatch          @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  
+  @@map("BST_MatchPlayer")
+  @@index([matchId])
+  @@index([oidUser])
+}
+
+model BST_RankedUserStats {
+  oidUser                  Int                      @id
+  matchesPlayed            Int                      @default(0)
+  matchesWon               Int                      @default(0)
+  eloRating                Int                      @default(1000)  // MMR
+  lastMatchAt              DateTime?
+  createdAt                DateTime                 @default(now())
+  updatedAt                DateTime                 @updatedAt
+  
+  @@map("BST_RankedUserStats")
+}
+
+// ============================================
+// LOGS DE PARTIDAS (BST_Fullmatchlog)
+// ============================================
+
+model BST_Fullmatchlog {
+  LogID                    BigInt                   @id @default(autoincrement())
+  LogDate                  DateTime
+  oidUser                  Int?
+  Money                    Int?
+  Exp                      Int?
+  HeadShotCnt              Int?
+  KillCnt                  Int?
+  DeadCnt                  Int?
+  isWin                    Int?
+  GameType                 Int?
+  MapNo                    Int?
+  GameMode                 Int?
+  IP                       String?                  @db.NVarChar(50)
+  IsValid                  Boolean                  @default(true)
+
+  // Outros campos disponíveis (não necessários para validação)
+  DoubleKillCnt            Int?
+  MultiKillCnt             Int?
+  UltraKillCnt             Int?
+  FantasticKillCnt         Int?
+  UnbelievableCnt          Int?
+  UnbelievablePlusCnt      Int?
+  RevengeCnt               Int?
+  FirstKill                Int?
+  KillsStreak              Int?
+  DeathsStreak             Int?
+  BombsPlanted             Int?
+  BombsExploded            Int?
+  BombsDefused             Int?
+  CaptureFlag              Int?
+  RecoverFlag              Int?
+  Forfeited                Int?
+  Assist                   Int?
+  Submission               Int?
+
+  @@map("BST_Fullmatchlog")
+  @@index([oidUser, LogDate])
+  @@index([MapNo, LogDate])
+  @@index([IsValid, LogDate])
+  @@index([GameMode, IsValid, LogDate])
+}

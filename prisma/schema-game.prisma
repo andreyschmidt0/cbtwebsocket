@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client-game"
+  binaryTargets = ["native", "rhel-openssl-1.0.x"]
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_GAME_URL")
+}
+
+// ============================================
+// BANCO COMBATARMS (Jogo)
+// ============================================
+
+model CBT_User {
+  oiduser                  Int                      @id
+  NickName                 String
+  EXP                      Int
+  KillCnt                  Int
+  DeadCnt                  Int
+  HeadshotCnt              Int
+  WinCnt                   Int
+  LoseCnt                  Int
+  Money                    Int?
+  UsedNX                   Int?                     @map("UsedNX")
+  NickNameColor            Int?
+  ColorEndDate             DateTime?
+  PlayRoundCnt             Int?
+  Forfeited                Int?
+  Assist                   Int?
+  FirstKill                Int?
+  DoubleKillCnt            Int?
+  MultiKillCnt             Int?
+  UltraKillCnt             Int?
+  FantasticKillCnt         Int?
+  UnbelievableCnt          Int?
+  UnbelievablePlusCnt      Int?
+  RevengeCnt               Int?
+  KillsStreak              Int?
+  MostKills                Int?
+  BombsPlanted             Int?
+  BombsExploded            Int?
+  BombsDefused             Int?
+  CaptureFlag              Int?
+  RecoverFlag              Int?
+  ClanWin                  Int?
+  ClanDraw                 Int?
+  ClanLose                 Int?
+  ClanKill                 Int?
+  ClanDead                 Int?
+  SuperRoomMaster          Int?
+  AgreeCnt                 Int?
+  DisagreeCnt              Int?
+  KickedCnt                Int?
+
+  // Relations
+  userAuth                 CBT_UserAuth?
+
+  @@map("CBT_User")
+}
+
+model CBT_UserAuth {
+  oidUser                  Int                      @id
+  strDiscordID             String?
+  strNexonID               String?
+  strLNexonID              String?
+  strPassword              String?
+  strEmail                 String?
+  bIsMailActive            Int?
+  BlockStartDate           DateTime?
+  BlockEndDate             DateTime?
+  RegDate                  DateTime?
+  UpdDate                  DateTime?
+  strLastMacAddress        String?
+  strLastLoginIP           String?
+  strLastHWID              String?
+  ClanRegDate              DateTime?
+
+  // Relations
+  user                     CBT_User                 @relation(fields: [oidUser], references: [oiduser])
+
+  @@map("CBT_UserAuth")
+}
