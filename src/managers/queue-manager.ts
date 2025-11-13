@@ -198,7 +198,7 @@ export class QueueManager {
         // Sempre libera flag, mesmo se houver erro
         this.isMatchmakingRunning = false
       }
-    }, 5000) // A cada 5 segundos
+    }, 3500) // A cada 5 segundos
   }
 
 /**

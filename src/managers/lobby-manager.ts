@@ -260,108 +260,112 @@ export class LobbyManager {
     // Executa o veto
     await this.vetoMap(matchId, lobby.currentTurn, randomMap, 'AUTO')
   }
+  
+  /**
+   * (HELPER) Finaliza a fase de veto e seleciona o mapa.
+   * Interrompe timers, atualiza status e notifica os callbacks.
+   */
+  private finalizeMapSelection(lobby: LobbyState, chosenMapId: string): void {
+    const { matchId } = lobby;
+
+    lobby.selectedMap = chosenMapId;
+    lobby.status = 'map-selected';
+    lobby.currentTurn = null;
+
+    // Para o timer
+    const timer = this.vetoTimers.get(matchId);
+    if (timer) {
+      clearInterval(timer);
+      this.vetoTimers.delete(matchId);
+    }
+
+    // Busca o nome do mapa para o log
+    const finalMapName = this.rankedMapPool.find(m => m.mapId === chosenMapId)?.mapName || chosenMapId;
+    log('info', `✅ Mapa selecionado para ${matchId}: ${finalMapName}`);
+
+    // Callback para o RankedWebSocketServer iniciar o HostManager
+    if (this.onMapSelectedCallback) {
+      this.onMapSelectedCallback(matchId, chosenMapId);
+    }
+  }
+
 
   /**
-   * Vetar um mapa
+   * Vetar um mapa (Versão Otimizada)
    */
   async vetoMap(matchId: string, team: 'ALPHA' | 'BRAVO', mapId: string, source: 'PLAYER' | 'AUTO' = 'PLAYER'): Promise<boolean> {
-    const lobby = this.lobbies.get(matchId)
+    const lobby = this.lobbies.get(matchId);
     if (!lobby) {
-      log('warn', `⚠️ Tentativa de vetar em lobby inexistente: ${matchId}`)
-      return false
+      log('warn', `⚠️ Tentativa de vetar em lobby inexistente: ${matchId}`);
+      return false;
     }
 
-    // Validações
+    // Validações (Guard Clauses)
     if (lobby.status !== 'veto-phase') {
-      log('warn', `⚠️ Tentativa de vetar fora da fase de veto: ${matchId}`)
-      return false
+      log('warn', `⚠️ Tentativa de vetar fora da fase de veto: ${matchId}`);
+      return false;
     }
-
     if (lobby.currentTurn !== team) {
-      log('warn', `⚠️ Time ${team} tentou vetar fora de sua vez (turno de ${lobby.currentTurn})`)
-      return false
+      log('warn', `⚠️ Time ${team} tentou vetar fora de sua vez (turno de ${lobby.currentTurn})`);
+      return false;
     }
-
     if (lobby.vetoedMaps.includes(mapId)) {
-      log('warn', `⚠️ Tentativa de vetar mapa já vetado: ${mapId}`)
-      return false
+      log('warn', `⚠️ Tentativa de vetar mapa já vetado: ${mapId}`);
+      return false;
     }
 
     // Mapeia ID para nome display
     const mapEntry = this.rankedMapPool.find(m => m.mapId === mapId);
     const mapName = mapEntry ? mapEntry.mapName : mapId;
 
-    // Registra veto
-    lobby.vetoedMaps.push(mapId)
-
-    // Novo limite: 6 vetos no total (3 por time). Se alcançar, escolhe mapa restante.
-    if (lobby.vetoedMaps.length >= 6 && lobby.status === 'veto-phase') {
-      const allMaps = this.rankedMapPool.map(m => m.mapId);
-      const remaining = allMaps.filter(m => !lobby.vetoedMaps.includes(m))
-      if (remaining.length > 0) {
-        const chosen = remaining[Math.floor(Math.random() * remaining.length)]
-        lobby.selectedMap = chosen
-        lobby.status = 'map-selected'
-        lobby.currentTurn = null
-        const timer = this.vetoTimers.get(matchId)
-        if (timer) { clearInterval(timer); this.vetoTimers.delete(matchId) }
-        log('info', `Mapa selecionado para ${matchId}: ${chosen}`)
-        if (this.onMapSelectedCallback) { this.onMapSelectedCallback(matchId, chosen) }
-      }
-    }
+    // Registra o veto
+    lobby.vetoedMaps.push(mapId);
     lobby.vetoHistory.push({
       round: lobby.vetoRound,
       team,
       mapId,
       mapName: mapName,
       timestamp: Date.now()
-    })
+    });
 
-  log('info', `${source === 'AUTO' ? '🎲' : '🚫'} Time ${team} vetou ${mapName} (rodada ${lobby.vetoRound + 1}/6)`)
+    log('info', `${source === 'AUTO' ? '🎲' : '🚫'} Time ${team} vetou ${mapName} (rodada ${lobby.vetoRound + 1}/6)`);
 
-    // Verifica se todos os vetos foram feitos (6 vetos total)
-    if (lobby.vetoedMaps.length >= 8) {
-      // Seleciona o mapa restante
+    // Lógica principal (Simplificada)
+    // A regra é: 6 vetos no total (3 por time).
+    const TOTAL_VETOS_REQUERIDOS = 6;
+
+    if (lobby.vetoedMaps.length >= TOTAL_VETOS_REQUERIDOS) {
+      // **Fase de Veto Concluída: Seleciona o mapa**
       const allMaps = this.rankedMapPool.map(m => m.mapId);
-      const remainingMap = allMaps.find(m => !lobby.vetoedMaps.includes(m))
+      const remainingMaps = allMaps.filter(m => !lobby.vetoedMaps.includes(m));
 
-      if (remainingMap) {
-        lobby.selectedMap = remainingMap
-        lobby.status = 'map-selected'
-        lobby.currentTurn = null
-
-        // Para o timer
-        const timer = this.vetoTimers.get(matchId)
-        if (timer) {
-          clearInterval(timer)
-          this.vetoTimers.delete(matchId)
-        }
-
-        const finalMapName = this.rankedMapPool.find(m => m.mapId === remainingMap)?.mapName || remainingMap;
-        log('info', `✅ Mapa selecionado para ${matchId}: ${finalMapName}`)
-
-        // Callback de mapa selecionado
-        if (this.onMapSelectedCallback) {
-          this.onMapSelectedCallback(matchId, remainingMap)
-        }
+      if (remainingMaps.length > 0) {
+        // Escolhe um mapa aleatoriamente dentre os restantes
+        const chosen = remainingMaps[Math.floor(Math.random() * remainingMaps.length)];
+        this.finalizeMapSelection(lobby, chosen); // <-- Usa o helper
+      } else {
+        // Fallback (caso o map pool tenha 6 mapas ou menos)
+        log('warn', `⚠️ Não há mapas restantes para escolher em ${matchId}. Selecionando o último vetado.`);
+        this.finalizeMapSelection(lobby, mapId); // <-- Usa o helper
       }
-    } else if (lobby.status === 'veto-phase') {
-      // Próxima rodada - alterna o turno
-      lobby.vetoRound++
-      lobby.currentTurn = lobby.currentTurn === 'ALPHA' ? 'BRAVO' : 'ALPHA'
 
-      log('info', `🔄 Próximo turno: Time ${lobby.currentTurn}`)
+    } else {
+      // **Fase de Veto Continua: Próximo turno**
+      lobby.vetoRound++;
+      lobby.currentTurn = lobby.currentTurn === 'ALPHA' ? 'BRAVO' : 'ALPHA';
 
-      // Callback de mudança de turno
+      log('info', `🔄 Próximo turno: Time ${lobby.currentTurn}`);
+
+      // Notifica o frontend sobre a mudança de turno
       if (this.onTurnChangeCallback) {
-        this.onTurnChangeCallback(matchId, lobby.currentTurn, 20)
+        this.onTurnChangeCallback(matchId, lobby.currentTurn, 20); // 20s para o próximo
       }
 
-      // Reinicia o timer
-      this.startVetoTimer(matchId)
+      // Reinicia o timer para o próximo time
+      this.startVetoTimer(matchId);
     }
 
-    // Atualiza Redis
+    // Atualiza o estado no Redis
     await this.redis.set(
       `lobby:${matchId}:vetos`,
       JSON.stringify({
@@ -371,16 +375,16 @@ export class LobbyManager {
         vetoRound: lobby.vetoRound
       }),
       { EX: 3600 }
-    )
+    );
 
-    // Callback de atualização
+    // Notifica o frontend sobre a atualização (mapa vetado, etc.)
     if (this.onVetoUpdateCallback) {
-      this.onVetoUpdateCallback(matchId, lobby)
+      this.onVetoUpdateCallback(matchId, lobby);
     }
 
-    return true
+    return true;
   }
-
+  
   /**
    * Votar em mapa (DEPRECATED - usar vetoMap)
    */
