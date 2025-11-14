@@ -42,6 +42,7 @@ interface LobbyState {
   status: 'waiting' | 'veto-phase' | 'map-selected' | 'ready'
 }
 
+
 /**
  * LobbyManager - Gerencia estado das lobbies após o ready check
  */
@@ -59,10 +60,16 @@ export class LobbyManager {
   // Timers para veto
   private vetoTimers: Map<string, NodeJS.Timeout> = new Map()
 
-  constructor() {
+constructor() {
     this.redis = getRedisClient()
     log('info', '✅ LobbyManager: Usando Redis singleton')
-    this.loadRankedMapPool();
+    
+    // Adicionamos um .catch() para capturar o erro de inicialização
+    this.loadRankedMapPool().catch(err => {
+      log('error', '❌❌ FALHA CRÍTICA AO CARREGAR MAP POOL ❌❌', err);
+      // Em produção, você talvez queira derrubar o processo
+      // process.exit(1); 
+    });
   }
 
   /**
@@ -288,7 +295,89 @@ export class LobbyManager {
       this.onMapSelectedCallback(matchId, chosenMapId);
     }
   }
+  
+/**
+   * Executa a troca de papéis (assignedRole) entre dois jogadores no Redis.
+   */
+async executeRoleSwap(
+    matchId: string, 
+    userA_oid: number, 
+    userB_oid: number
+  ): Promise<boolean> {
+    
+    const lobby = this.lobbies.get(matchId);
+    if (!lobby) {
+      log('warn', `Troca falhou: Lobby ${matchId} não encontrado.`);
+      return false;
+    }
 
+    const teamA = lobby.teams.ALPHA.some(p => p.oidUser === userA_oid) ? 'ALPHA' : 'BRAVO';
+    const teamB = lobby.teams.ALPHA.some(p => p.oidUser === userB_oid) ? 'ALPHA' : 'BRAVO';
+
+    if (teamA !== teamB) {
+      log('warn', `Troca falhou: ${userA_oid} e ${userB_oid} não estão no mesmo time.`);
+      return false;
+    }
+
+    const redisKey = `match:${matchId}:classes`;
+    let dataA_str: string | null = null;
+    let dataB_str: string | null = null;
+    let dataA: any = null;
+    let dataB: any = null;
+
+    try {
+      // 1. Puxar os dados de classe atuais do Redis
+      [dataA_str, dataB_str] = await this.redis.hmGet(redisKey, [
+        userA_oid.toString(),
+        userB_oid.toString()
+      ]);
+
+      // 2. Parsear os dados
+      dataA = dataA_str ? JSON.parse(dataA_str as string) : null;
+      dataB = dataB_str ? JSON.parse(dataB_str as string) : null;
+
+      // 3. Checar se os dados parseados são válidos
+      if (!dataA || !dataB) {
+        log('error', `Falha ao buscar/parsear classes no Redis para troca (match ${matchId})`, { 
+          userA_oid,
+          userB_oid,
+          userA_data_raw: dataA_str, 
+          userB_data_raw: dataB_str 
+        });
+        return false;
+      }
+
+      // 4. Trocar os papéis
+      const originalRoleA = dataA.assignedRole;
+      dataA.assignedRole = dataB.assignedRole;
+      dataB.assignedRole = originalRoleA;
+
+      // 5. Salvar os dados atualizados de volta no Redis
+      await this.redis.hSet(redisKey, {
+        [userA_oid.toString()]: JSON.stringify(dataA),
+        [userB_oid.toString()]: JSON.stringify(dataB)
+      })
+      
+      log('info', `🔄 Troca de papéis efetuada (Match ${matchId}): ${userA_oid} (${originalRoleA}) <> ${userB_oid} (${dataA.assignedRole})`);
+      return true;
+
+    } catch (error: any) {
+      // --- ESTE É O LOG DE DEBUG MAIS IMPORTANTE ---
+      log('error', `❌ ERRO FATAL EM executeRoleSwap (match ${matchId})`, { 
+          message: error.message,
+          stack: error.stack,
+          userA_oid,
+          userB_oid,
+          redisKey,
+          dataA_str, // Loga o que veio do Redis
+          dataB_str, // Loga o que veio do Redis
+          dataA_parsed: dataA, // Loga o que foi parseado
+          dataB_parsed: dataB  // Loga o que foi parseado
+      });
+      // --- FIM DO LOG DE DEBUG ---
+      return false;
+    }
+  }
 
   /**
    * Vetar um mapa (Versão Otimizada)

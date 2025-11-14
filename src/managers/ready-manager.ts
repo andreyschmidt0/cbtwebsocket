@@ -10,6 +10,7 @@ interface ReadyCheck {
   timeout: NodeJS.Timeout
   startedAt: number
   expiresAt: number
+  status?: 'PENDING' | 'COMPLETING'
 }
 
 export class ReadyManager {
@@ -72,7 +73,7 @@ export class ReadyManager {
       this.handleTimeout(matchId)
     }, this.READY_TIMEOUT)
 
-    this.activeChecks.set(matchId, { matchId, players: playerMap, timeout, startedAt: now, expiresAt })
+    this.activeChecks.set(matchId, { matchId, players: playerMap, timeout, startedAt: now, expiresAt, status: 'PENDING' })
 
     const redisKey = `match:${matchId}:ready`
     const pipeline = this.redis.multi()
@@ -89,12 +90,15 @@ export class ReadyManager {
   }
 
   // Jogador confirma ready
-  async handleReady(matchId: string, oidUser: number): Promise<void> {
+async handleReady(matchId: string, oidUser: number): Promise<void> {
     const check = this.activeChecks.get(matchId)
-    if (!check) {
-      log('warn', `Ready check não encontrado: ${matchId}`)
+
+    // --- CADEADO (Lock) ---
+    // Se o check não existe, OU se ele já está sendo completado, ignora
+    if (!check || check.status === 'COMPLETING') {
       return
     }
+    // --- FIM DO CADEADO ---
 
     const player = check.players.get(oidUser)
     if (!player) {
@@ -102,22 +106,30 @@ export class ReadyManager {
       return
     }
 
-    player.status = 'READY'
+    // Só atualiza se o status for PENDING
+    if (player.status === 'PENDING') {
+        player.status = 'READY'
+        const redisKey = `match:${matchId}:ready`
+        await this.redis.hSet(redisKey, oidUser.toString(), 'READY')
 
-    const redisKey = `match:${matchId}:ready`
-    await this.redis.hSet(redisKey, oidUser.toString(), 'READY')
+        if (player.ws && player.ws.readyState === WebSocket.OPEN) {
+          player.ws.send(JSON.stringify({ type: 'READY_CONFIRMED', matchId }))
+        }
 
-    if (player.ws && player.ws.readyState === WebSocket.OPEN) {
-      player.ws.send(JSON.stringify({ type: 'READY_CONFIRMED', matchId }))
-    }
+        const readyCount = Array.from(check.players.values()).filter(p => p.status === 'READY').length
+        const totalPlayers = check.players.size
+        log('info', `${player.username || `Player ${oidUser}`} aceitou (${readyCount}/${totalPlayers}) [REDIS]`)
+        this.broadcastReadyStatus(check, readyCount, totalPlayers)
 
-    const readyCount = Array.from(check.players.values()).filter(p => p.status === 'READY').length
-    const totalPlayers = check.players.size
-    log('info', `${player.username} aceitou (${readyCount}/${totalPlayers}) [REDIS]`)
-    this.broadcastReadyStatus(check, readyCount, totalPlayers)
-
-    if (readyCount === totalPlayers) {
-      await this.handleAllReady(matchId)
+        if (readyCount === totalPlayers) {
+            // --- CADEADO (Lock) ---
+            // Verifica novamente o status para garantir que só execute UMA VEZ
+            if (check.status === 'PENDING') {
+              check.status = 'COMPLETING' // Define o "cadeado"
+              await this.handleAllReady(matchId)
+            }
+            // --- FIM DO CADEADO ---
+        }
     }
   }
 

@@ -69,7 +69,7 @@ export class RankedWebSocketServer {
     // Permitir seu frontend, 'null' (para testes locais file://) e localhost
     const corsOrigins = [FRONTEND_URL, 'null', 'http://localhost:3001'];
     
-    log('info', `🌐 CORS Permitido para: ${FRONTEND_URL}`);
+    log('debug', `🌐 CORS Permitido para: ${FRONTEND_URL}`);
     
     this.app.use(
       cors({
@@ -100,7 +100,7 @@ export class RankedWebSocketServer {
     this.lobbyManager = new LobbyManager();
     this.validationManager = new ValidationManager({
       onMatchCompleted: async (matchId, result) => {
-        log('info', `✅ Match ${matchId} validado! Vencedor: ${result.winner}`);
+        log('debug', `✅ Match ${matchId} validado! Vencedor: ${result.winner}`);
 
         // ... (lógica de onMatchCompleted - sem mudanças) ...
         // Busca jogadores e stats da partida (inclui MMR já atualizado)
@@ -299,7 +299,7 @@ export class RankedWebSocketServer {
     // 7. Configurar o Servidor WebSocket
     this.setupWebSocketServer();
 
-    log('info', `🚀 Ranked WebSocket Server pronto.`);
+    log('debug', `🚀 Ranked WebSocket Server pronto.`);
   }
 
   /**
@@ -307,7 +307,7 @@ export class RankedWebSocketServer {
    */
   public listen(port: number | string): void {
     this.httpServer.listen(port, () => {
-      log('info', `🚀 Servidor escutando na porta ${port}`);
+      log('debug', `🚀 Servidor escutando na porta ${port}`);
     });
   }
 
@@ -321,7 +321,7 @@ export class RankedWebSocketServer {
 
     // Callback quando QueueManager encontrar match
     this.queueManager.onMatchFound((matchId: string, players: QueuePlayer[], teams: any) => {
-      log('info', `📢 Notificando 10 jogadores sobre match ${matchId}`)
+      log('debug', `📢 Notificando 10 jogadores sobre match ${matchId}`)
 
       for (const player of players) {
         const team = teams.ALPHA.find((t: QueuePlayer) => t.oidUser === player.oidUser) ? 'ALPHA' : 'BRAVO'
@@ -343,7 +343,7 @@ export class RankedWebSocketServer {
 
 // Callback quando ReadyManager completar (todos aceitaram)
     this.readyManager.onReadyComplete(async (matchId, lobbyData) => {
-      log('info', `📢 Ready check completo! Criando lobby para match ${matchId}...`)
+      log('debug', `📢 Ready check completo! Criando lobby para match ${matchId}...`)
 
       try {
         // CORREÇÃO: Não precisamos mais consultar o BST_MatchPlayer.
@@ -358,7 +358,7 @@ export class RankedWebSocketServer {
           return;
         }
 
-        log('info', `ℹ️ Match ${matchId} tem ${matchPlayers.length} jogadores`)
+        log('debug', `ℹ️ Match ${matchId} tem ${matchPlayers.length} jogadores`)
 
         // Separa times e anonimiza usernames
         // (Buscamos o MMR real do objeto, não mais o '1000' fixo)
@@ -375,7 +375,7 @@ export class RankedWebSocketServer {
           }))
         }
 
-        log('info', `⚔️ Times: ALPHA=${teams.ALPHA.length}, BRAVO=${teams.BRAVO.length}`)
+        log('debug', `⚔️ Times: ALPHA=${teams.ALPHA.length}, BRAVO=${teams.BRAVO.length}`)
 
         // Cria lobby (no LobbyManager)
         await this.lobbyManager.createLobby(matchId, teams)
@@ -383,7 +383,7 @@ export class RankedWebSocketServer {
         // Usa os playerIds do lobbyData
         const playerIds = matchPlayers.map((p: any) => p.oidUser)
 
-        log('info', `🏁 Enviando LOBBY_READY para ${playerIds.length} jogadores: ${playerIds.join(', ')}`)
+        log('debug', `🏁 Enviando LOBBY_READY para ${playerIds.length} jogadores: ${playerIds.join(', ')}`)
 
         // Redireciona todos para a página da lobby
         this.sendToPlayers(playerIds, {
@@ -394,7 +394,7 @@ export class RankedWebSocketServer {
           }
         })
 
-        log('info', `✅ LOBBY_READY enviado com sucesso para match ${matchId}`)
+        log('debug', `✅ LOBBY_READY enviado com sucesso para match ${matchId}`)
       } catch (error) {
         log('error', `❌ Erro ao criar lobby para match ${matchId}:`, error)
       }
@@ -422,7 +422,7 @@ this.readyManager.onReadyFailed(async (
       });
 
       // 2. Recoloca na fila os jogadores (corrigido para usar a lógica de snapshot)
-      log('info', `[ReadyFailed ${matchId}] Buscando snapshot da fila...`);
+      log('debug', `[ReadyFailed ${matchId}] Buscando snapshot da fila...`);
       const snapshotByPlayer: Record<number, { queuedAt?: number; classes?: QueuePlayer['classes'] }> = {};
       try {
         // Busca os dados da fila (classes, queuedAt) que salvamos no QueueManager
@@ -502,7 +502,7 @@ this.readyManager.onReadyFailed(async (
 
     // Callback quando mapa for selecionado na lobby
   this.lobbyManager.onMapSelected(async (matchId, mapId) => {
-      log('info', `🗺️ Mapa ${mapId} selecionado para match ${matchId}, iniciando HOST selection...`)
+      log('debug', `🗺️ Mapa ${mapId} selecionado para match ${matchId}, iniciando HOST selection...`)
 
       // Atualiza o BST_RankedMatch com o nome (string) do mapa selecionado
       try {
@@ -591,7 +591,7 @@ this.readyManager.onReadyFailed(async (
 
       const playerIds = [...lobby.teams.ALPHA, ...lobby.teams.BRAVO].map(p => p.oidUser)
 
-      log('info', `🔄 Turno alterado para ${newTurn} - ${timeRemaining}s`)
+      log('debug', `🔄 Turno alterado para ${newTurn} - ${timeRemaining}s`)
 
       this.sendToPlayers(playerIds, {
         type: 'TURN_CHANGE',
@@ -605,7 +605,7 @@ this.readyManager.onReadyFailed(async (
 
     // Callback quando HOSTManager selecionar HOST
     this.hostManager.onHostSelected((matchId, hostOidUser, hostUsername, mapNumber) => {
-      log('info', `📢 Notificando jogadores sobre HOST: ${hostUsername}`)
+      log('debug', `📢 Notificando jogadores sobre HOST: ${hostUsername}`)
 
       // Busca todos jogadores do match
       prismaRanked.$queryRaw<any[]>`
@@ -647,7 +647,7 @@ this.readyManager.onReadyFailed(async (
 
     // Callback quando sala for confirmada
   this.hostManager.onRoomConfirmed(async (matchId, roomId, mapNumber) => {
-      log('info', `📢 Sala confirmada! Notificando jogadores (Room: ${roomId}, Mapa: ${mapNumber})`)
+      log('debug', `📢 Sala confirmada! Notificando jogadores (Room: ${roomId}, Mapa: ${mapNumber})`)
 
       // --- INÍCIO DA CORREÇÃO ---
       // Pega os jogadores do lobby em memória, NÃO do SQL
@@ -683,7 +683,7 @@ this.readyManager.onReadyFailed(async (
         new Date(), // startedAt
         playerIds
       );
-      log('info', `🔍 Validação iniciada para match ${matchId} (${playerIds.length} jogadores)`);
+      log('debug', `🔍 Validação iniciada para match ${matchId} (${playerIds.length} jogadores)`);
   });
   }
 
@@ -693,7 +693,7 @@ this.readyManager.onReadyFailed(async (
   private setupWebSocketServer(): void {
     this.wss.on('connection', (ws: AuthenticatedWebSocket) => {
       // ... (Toda a sua lógica de 'connection', 'message', 'close', etc. - sem mudanças) ...
-      log('info', '🔌 Nova conexão WebSocket')
+      log('debug', '🔌 Nova conexão WebSocket')
 
       ws.isAlive = true
 
@@ -778,6 +778,14 @@ this.readyManager.onReadyFailed(async (
         case 'CHAT_SEND':
           await this.handleChatSend(ws, payload)
           break
+		  
+		case 'LOBBY_REQUEST_SWAP':
+          await this.handleLobbyRequestSwap(ws, payload)
+          break
+		  
+		case 'LOBBY_ACCEPT_SWAP':
+          await this.handleLobbyAcceptSwap(ws, payload)
+          break
 
         default:
           log('warn', `⚠️ Mensagem desconhecida: ${message.type}`)
@@ -845,7 +853,7 @@ this.readyManager.onReadyFailed(async (
 
       if (user && user.length > 0 && user[0].NickName) {
         ws.username = user[0].NickName
-        log('info', `✅ Username validado do banco: ${ws.username}`)
+        log('debug', `✅ Username validado do banco: ${ws.username}`)
       } else {
         log('warn', `⚠️ NickName não encontrado no banco para ${oidUser}, usando fallback`)
         ws.username = username || `Player${oidUser}`
@@ -857,7 +865,7 @@ this.readyManager.onReadyFailed(async (
 
     this.clients.set(oidUser, ws)
 
-    log('info', `✅ ${ws.username} (${oidUser}) autenticado${normalizedDiscordId ? ` [Discord: ${normalizedDiscordId}]` : ''}`)
+    log('debug', `✅ ${ws.username} (${oidUser}) autenticado${normalizedDiscordId ? ` [Discord: ${normalizedDiscordId}]` : ''}`)
 
     this.sendMessage(ws, {
       type: 'AUTH_SUCCESS',
@@ -941,7 +949,7 @@ this.readyManager.onReadyFailed(async (
         await this.redis.del(requeueKey).catch(() => { })
       }
 
-      log('info', `✅ ${ws.username} entrou na fila`)
+      log('debug', `✅ ${ws.username} entrou na fila`)
 
       const queueSize = this.queueManager.getQueueSize()
 
@@ -971,7 +979,7 @@ this.readyManager.onReadyFailed(async (
 
     await this.queueManager.removeFromQueue(ws.oidUser)
 
-    log('info', `❌ ${ws.username} saiu da fila`)
+    log('debug', `❌ ${ws.username} saiu da fila`)
 
     this.sendMessage(ws, {
       type: 'QUEUE_LEFT',
@@ -991,12 +999,70 @@ this.readyManager.onReadyFailed(async (
     }
 
     await this.readyManager.handleReady(String(matchId), ws.oidUser)
-    log('info', `✅ ${ws.username} aceitou match ${matchId}`)
+    log('debug', `✅ ${ws.username} aceitou match ${matchId}`)
 
     this.sendMessage(ws, {
       type: 'READY_ACCEPTED',
       payload: { matchId }
     })
+  }
+
+/**
+   * LOBBY_REQUEST_SWAP - Jogador solicita troca com um colega
+   */
+  private async handleLobbyRequestSwap(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser || !ws.username) return;
+    const { matchId, targetOidUser } = payload;
+    if (!matchId || !targetOidUser) return;
+
+    const lobby = this.lobbyManager.getLobby(matchId);
+    if (!lobby) return;
+
+    // Envia a solicitação APENAS para o jogador alvo
+    this.sendToPlayer(targetOidUser, {
+      type: 'LOBBY_SWAP_REQUESTED',
+      payload: {
+        matchId,
+        requestingOidUser: ws.oidUser,
+        requestingUsername: ws.username
+      }
+    });
+  }
+
+  /**
+   * LOBBY_ACCEPT_SWAP - Jogador aceita uma solicitação de troca
+   */
+  private async handleLobbyAcceptSwap(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const accepterOidUser = ws.oidUser;
+    const { matchId, requestingOidUser } = payload;
+    if (!matchId || !requestingOidUser) return;
+
+    // 1. Executa a troca no LobbyManager (que atualiza o Redis)
+    const success = await this.lobbyManager.executeRoleSwap(matchId, accepterOidUser, requestingOidUser);
+
+    if (!success) {
+      this.sendError(ws, 'Falha ao processar a troca.');
+      return;
+    }
+
+    // 2. Após a troca, precisamos ATUALIZAR o estado de TODOS os jogadores no lobby.
+    // A forma mais fácil de re-sincronizar é forçar um 'LOBBY_JOIN' para todos.
+    const lobby = this.lobbyManager.getLobby(matchId);
+    if (!lobby) return;
+
+    const allPlayerIds = [
+      ...lobby.teams.ALPHA.map(p => p.oidUser),
+      ...lobby.teams.BRAVO.map(p => p.oidUser)
+    ];
+
+    for (const oid of allPlayerIds) {
+      const client = this.clients.get(oid);
+      if (client && client.readyState === WebSocket.OPEN) {
+        // Re-chama o handleLobbyJoin para este cliente, que enviará LOBBY_DATA atualizado
+        await this.handleLobbyJoin(client, { matchId });
+      }
+    }
   }
 
   /**
@@ -1011,7 +1077,7 @@ this.readyManager.onReadyFailed(async (
       return this.sendError(ws, 'matchId ausente em READY_DECLINE')
     }
 
-    log('info', `❌ ${ws.username} recusou match ${matchId}`)
+    log('debug', `❌ ${ws.username} recusou match ${matchId}`)
 
     // Notifica o ReadyManager; ele cancela o match e dispara onReadyFailed
     await this.readyManager.handleDecline(String(matchId), ws.oidUser)
@@ -1061,7 +1127,7 @@ this.readyManager.onReadyFailed(async (
 
     await this.hostManager.confirmHostRoom(matchId, ws.oidUser, roomId, mapNumber)
 
-    log('info', `🏁 ${ws.username} criou sala ${roomId} (match ${matchId})`)
+    log('debug', `🏁 ${ws.username} criou sala ${roomId} (match ${matchId})`)
 
     this.sendMessage(ws, {
       type: 'HOST_CONFIRMED',
@@ -1158,7 +1224,7 @@ this.readyManager.onReadyFailed(async (
         mapPool: mapPool // <-- ADICIONE ESTA LINHA
       }
     });
-    log('info', `🏰 ${ws.username} entrou na lobby ${matchId}`);
+    log('debug', `🏰 ${ws.username} entrou na lobby ${matchId}`);
   }
 
   /**
@@ -1208,7 +1274,7 @@ this.readyManager.onReadyFailed(async (
       return
     }
 
-    log('info', `🚫 ${ws.username} (${playerTeam}) vetou ${mapId}`)
+    log('debug', `🚫 ${ws.username} (${playerTeam}) vetou ${mapId}`)
 
     // A atualização será enviada via callback onVetoUpdate
   }
@@ -1243,7 +1309,7 @@ this.readyManager.onReadyFailed(async (
       }
     })
 
-    log('info', `🗳️ ${ws.username} votou em ${mapId} para match ${matchId}`)
+    log('debug', `🗳️ ${ws.username} votou em ${mapId} para match ${matchId}`)
   }
 
   /**
@@ -1433,11 +1499,11 @@ private async validateAuthToken(params: TokenValidationParams): Promise<TokenVal
   private handleDisconnect(ws: AuthenticatedWebSocket): void {
     // ... (Todo o seu método handleDisconnect - sem mudanças) ...
     if (ws.oidUser) {
-      log('info', `🔌 ${ws.username} (${ws.oidUser}) desconectou`)
+      log('debug', `🔌 ${ws.username} (${ws.oidUser}) desconectou`)
 
       if (this.queueManager.isInQueue(ws.oidUser)) {
         this.queueManager.removeFromQueue(ws.oidUser);
-        log('info', `🔄 ${ws.username} removido da fila devido à desconexão.`);
+        log('debug', `🔄 ${ws.username} removido da fila devido à desconexão.`);
       }
 
       const matchWithPlayer = this.readyManager.findMatchIdByPlayer(ws.oidUser)
@@ -1529,7 +1595,7 @@ private async validateAuthToken(params: TokenValidationParams): Promise<TokenVal
    * Encerrar servidor (graceful shutdown)
    */
   async shutdown(): Promise<void> {
-    log('info', '🛑 Encerrando Ranked WebSocket Server...')
+    log('debug', '🛑 Encerrando Ranked WebSocket Server...')
 
     // Para managers (limpa timers e intervals)
     this.queueManager.stop()
@@ -1553,13 +1619,13 @@ private async validateAuthToken(params: TokenValidationParams): Promise<TokenVal
     // --- AJUSTE ADICIONADO AQUI ---
     // Fecha o servidor HTTP e SÓ ENTÃO desliga o banco
     this.httpServer.close(async () => {
-      log('info', '🔌 Servidor HTTP encerrado.');
+      log('debug', '🔌 Servidor HTTP encerrado.');
       
       // Desconecta banco de dados e Redis
       const { disconnectAll } = await import('./database/disconnect')
       await disconnectAll() //
 
-      log('info', '✅ Servidor encerrado com sucesso')
+      log('debug', '✅ Servidor encerrado com sucesso')
     });
   }
 }
@@ -1570,21 +1636,34 @@ if (require.main === module) {
   // <-- Bloco 'if' inteiramente modificado
   const PORT = process.env.PORT || 3001;
   
+  log('debug', '🔧 Iniciando CBT WebSocket Server...');
+  log('debug', `📋 Configurações:`);
+  log('debug', `   • Porta: ${PORT}`);
+  log('debug', `   • Ambiente: ${process.env.NODE_ENV || 'development'}`);
+  log('debug', `   • Database: ${process.env.DATABASE_URL ? 'Configurado' : 'NÃO CONFIGURADO'}`);
+  log('debug', `   • Redis: ${process.env.REDIS_URL ? 'Configurado' : 'NÃO CONFIGURADO'}`);
+  log('debug', `   • Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+  
   // 1. Cria a instância do servidor (que agora cria o app/http/wss no construtor)
   const serverInstance = new RankedWebSocketServer();
   
   // 2. Inicia o servidor HTTP para escutar na porta
   serverInstance.listen(PORT);
 
+  log('debug', `✅ Servidor iniciado com sucesso!`);
+  log('debug', `🌐 WebSocket disponível em: ws://localhost:${PORT}`);
+  log('debug', `🔗 HTTP API disponível em: http://localhost:${PORT}`);
+  log('debug', `📊 Health check: http://localhost:${PORT}/health`);
+
   // Graceful shutdown
   process.on('SIGTERM', async () => {
-    log('info', '🛑 Encerrando (SIGTERM)...');
+    log('debug', '🛑 Encerrando (SIGTERM)...');
     await serverInstance.shutdown();
     process.exit(0);
   });
 
   process.on('SIGINT', async () => {
-    log('info', '🛑 Encerrando (SIGINT)...');
+    log('debug', '🛑 Encerrando (SIGINT)...');
     await serverInstance.shutdown();
     process.exit(0);
   });
