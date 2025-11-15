@@ -47,8 +47,17 @@ export class HOSTManager {
 
   // Inicia seleção do HOST
   async startHostSelection(matchId: string, players: HostPlayer[], mapNumber: number): Promise<void> {
-  // Gera senha aleatória de 4 dígitos
-  await this.redis.set(`match:${matchId}:hostPassword`, Math.floor(1000 + Math.random() * 9000).toString(), { EX: 7200 });
+    // Caso o callback seja disparado novamente para o mesmo match (ex: mapa reemitido),
+    // limpamos o timer anterior para garantir os 120s completos a partir deste ciclo.
+    const previousAttempt = this.activeHosts.get(matchId)
+    if (previousAttempt) {
+      clearTimeout(previousAttempt.timeout)
+      this.activeHosts.delete(matchId)
+      log('warn', `Iniciando nova seleção de HOST para ${matchId}. Timer anterior descartado.`)
+    }
+
+    // Gera senha aleatória de 4 dígitos
+    await this.redis.set(`match:${matchId}:hostPassword`, Math.floor(1000 + Math.random() * 9000).toString(), { EX: 7200 });
     const sorted = [...players].sort((a, b) => b.mmr - a.mmr);
     const hostPlayer = sorted[0];
 
@@ -175,7 +184,8 @@ export class HOSTManager {
     const attempt = this.activeHosts.get(matchId)
     if (!attempt) return
     const host = attempt.players[attempt.currentHostIndex]
-    log('warn', `Timeout do HOST ${host?.username} no match ${matchId}`)
+    const elapsed = Date.now() - attempt.startedAt
+    log('warn', `Timeout do HOST ${host?.username} no match ${matchId} (decorrido: ${(elapsed / 1000).toFixed(1)}s)`)
     await this.abortAndCleanup(matchId, 'TIMEOUT')
     if (this.onHostAbortedCallback) {
       const ids = attempt.players.map(p => p.oidUser)
