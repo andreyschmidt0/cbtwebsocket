@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import { prisma } from './prisma'
 import { MatchSnapshot, MatchResult } from '../lobby/types'
 import { log } from '../utils/logger'
@@ -84,25 +85,32 @@ async function updatePlayerStats(matchId: string, winnerId?: number, winnerTeam?
       FROM BST_MatchPlayer
       WHERE matchId = ${matchId}
     `
+    if (matchPlayers.length === 0) {
+      return
+    }
+
+    const playerIds = matchPlayers.map(player => player.oidUser)
+    let existing: any[] = []
+    try {
+      existing = await prisma.$queryRaw<any[]>`
+        SELECT oidUser FROM BST_RankedUserStats WHERE oidUser IN (${Prisma.join(playerIds)})
+      `
+    } catch (error) {
+      log('warn', `Falha ao buscar stats existentes para partida ${matchId}`, error)
+    }
+    const existingSet = new Set(existing.map(row => row.oidUser))
 
     // Atualizar stats de cada jogador
+    const writes: Promise<any>[] = []
     for (const player of matchPlayers) {
       const isWinner = (winnerId && player.oidUser === winnerId) || (winnerTeam && player.team === winnerTeam)
-
-      // Verifica se stats já existem
-      const existing = await prisma.$queryRaw<any[]>`
-        SELECT oidUser FROM BST_RankedUserStats WHERE oidUser = ${player.oidUser}
-      `
-
-      if (existing.length === 0) {
-        // Cria novo registro
-        await prisma.$executeRaw`
+      if (!existingSet.has(player.oidUser)) {
+        writes.push(prisma.$executeRaw`
           INSERT INTO BST_RankedUserStats (oidUser, matchesPlayed, matchesWon, eloRating, lastMatchAt, createdAt, updatedAt)
           VALUES (${player.oidUser}, 1, ${isWinner ? 1 : 0}, 1000, GETDATE(), GETDATE(), GETDATE())
-        `
+        `)
       } else {
-        // Atualiza existente
-        await prisma.$executeRaw`
+        writes.push(prisma.$executeRaw`
           UPDATE BST_RankedUserStats
           SET 
             matchesPlayed = matchesPlayed + 1,
@@ -110,9 +118,10 @@ async function updatePlayerStats(matchId: string, winnerId?: number, winnerTeam?
             lastMatchAt = GETDATE(),
             updatedAt = GETDATE()
           WHERE oidUser = ${player.oidUser}
-        `
+        `)
       }
     }
+    await Promise.all(writes)
 
     log('info', `📊 Stats de ${matchPlayers.length} jogadores atualizados`)
   } catch (error) {

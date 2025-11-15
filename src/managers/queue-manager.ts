@@ -111,6 +111,14 @@ export class QueueManager {
       return { valid: false, reason: 'ALREADY_IN_QUEUE' }
     }
 
+    // Cache de validação para reduzir round-trips no banco
+    try {
+      const cached = await this.redis.get(`player:validated:${oidUser}`)
+      if (cached === 'OK') {
+        return { valid: true }
+      }
+    } catch {}
+
     // 1.1. Verifica cooldown ativo (Redis)
     try {
       const cooldownKey = `cooldown:${oidUser}`
@@ -162,6 +170,10 @@ export class QueueManager {
       }
     }
 
+    try {
+      await this.redis.set(`player:validated:${oidUser}`, 'OK', { EX: 300 })
+    } catch {}
+
     return { valid: true }
   }
 
@@ -207,7 +219,7 @@ export class QueueManager {
    * - Slots-alvo: 2x SNIPER, 8x "Rifles" (T1-T4 ou SMG)
    * - Garante que os 8 "Rifles" não sejam SNIPER primário.
    */
-private async findMatch(): Promise<QueuePlayer[] | null> {
+  private async findMatch(): Promise<QueuePlayer[] | null> {
     const players = Array.from(this.queue.values())
     players.sort((a, b) => (a.queuedAt || 0) - (b.queuedAt || 0)) // FIFO
 
@@ -227,8 +239,8 @@ private async findMatch(): Promise<QueuePlayer[] | null> {
       
       if (mmrPool.length < 10) continue; // Pula para o próximo jogador de referência
 
-      // Dentro do pool de MMR, pega os 10 mais antigos
-      const picked = mmrPool.sort((a, b) => (a.queuedAt || 0) - (b.queuedAt || 0)).slice(0, 10);
+      // Dentro do pool de MMR, pega os 10 mais antigos (já ordenados do array original)
+      const picked = mmrPool.slice(0, 10);
       
       // *** ÚNICA REGRA: ***
       // O grupo de 10 precisa ter pelo menos 2 jogadores que possam ser SNIPER
@@ -272,19 +284,22 @@ private async findMatch(): Promise<QueuePlayer[] | null> {
     }
 
     // Remove jogadores da fila
+    const removeMulti = this.redis.multi()
     for (const player of players) {
       this.queue.delete(player.oidUser)
-      await this.redis.del(`queue:ranked:${player.oidUser}`)
+      removeMulti.del(`queue:ranked:${player.oidUser}`)
     }
+    await removeMulti.exec()
 
     // Balanceia times considerando sniper e tiers
     const teams = this.balanceTeams(players)
     if (!teams) {
       log('warn', `⚠️ Match ${matchId} cancelado: não foi possível formar dois times válidos com as regras de tier`)
 
+      const requeueMulti = this.redis.multi()
       for (const player of players) {
         this.queue.set(player.oidUser, player)
-        await this.redis.set(
+        requeueMulti.set(
           `queue:ranked:${player.oidUser}`,
           JSON.stringify({
             oidUser: player.oidUser,
@@ -296,6 +311,7 @@ private async findMatch(): Promise<QueuePlayer[] | null> {
           { EX: 3600 }
         )
       }
+      await requeueMulti.exec()
 
       await this.redis.del(`match:${matchId}:queueSnapshot`).catch(() => {})
       return
@@ -330,15 +346,17 @@ private async findMatch(): Promise<QueuePlayer[] | null> {
         ...teams.BRAVO.map(item => ({ ...item.player, assignedRole: item.role }))
       ]
 
+      const classesMulti = this.redis.multi()
       for (const p of allPlayersWithRoles) {
         const dataToStore = {
           primary: p.classes?.primary || 'T3',
           secondary: p.classes?.secondary || 'SMG',
           assignedRole: p.assignedRole // <-- A INFORMAÇÃO CRÍTICA
         }
-        await this.redis.hSet(key, p.oidUser.toString(), JSON.stringify(dataToStore))
+        classesMulti.hSet(key, p.oidUser.toString(), JSON.stringify(dataToStore))
       }
-      await this.redis.expire(key, 7200) // 2 horas
+      classesMulti.expire(key, 7200)
+      await classesMulti.exec()
     } catch (err) {
         log('error', `Falha ao salvar papéis no Redis para match ${matchId}`, err)
     }

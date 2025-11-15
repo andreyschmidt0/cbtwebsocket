@@ -604,18 +604,13 @@ this.readyManager.onReadyFailed(async (
     })
 
     // Callback quando HOSTManager selecionar HOST
-    this.hostManager.onHostSelected((matchId, hostOidUser, hostUsername, mapNumber) => {
+    this.hostManager.onHostSelected(async (matchId, hostOidUser, hostUsername, mapNumber) => {
       log('debug', `📢 Notificando jogadores sobre HOST: ${hostUsername}`)
 
-      // Busca todos jogadores do match
-      prismaRanked.$queryRaw<any[]>`
-        SELECT oidUser FROM BST_MatchPlayer WHERE matchId = ${matchId}
-      `.then(async (players: any) => {
-        // Recupera senha do Redis
-        const hostPassword = await this.redis.get(`match:${matchId}:hostPassword`);
+      const notifyPlayers = async (players: { oidUser: number }[]) => {
+        const hostPassword = await this.redis.get(`match:${matchId}:hostPassword`)
         for (const p of players) {
           if (p.oidUser === hostOidUser) {
-            // Notifica o HOST
             this.sendToPlayer(p.oidUser, {
               type: 'HOST_SELECTED',
               payload: {
@@ -629,7 +624,6 @@ this.readyManager.onReadyFailed(async (
               }
             })
           } else {
-            // Notifica os outros
             this.sendToPlayer(p.oidUser, {
               type: 'HOST_WAITING',
               payload: {
@@ -642,7 +636,20 @@ this.readyManager.onReadyFailed(async (
             })
           }
         }
-      })
+      }
+
+      const lobby = this.lobbyManager.getLobby(matchId)
+      if (lobby) {
+        const players = [...lobby.teams.ALPHA, ...lobby.teams.BRAVO].map(p => ({ oidUser: p.oidUser }))
+        await notifyPlayers(players)
+        return
+      }
+
+      prismaRanked.$queryRaw<any[]>`
+        SELECT oidUser FROM BST_MatchPlayer WHERE matchId = ${matchId}
+      `
+        .then(notifyPlayers)
+        .catch(err => log('warn', `Falha ao notificar HOST_SELECTED: ${err}`))
     })
 
     // Callback quando sala for confirmada
