@@ -23,6 +23,7 @@ export class HOSTManager {
   private activeHosts: Map<string, HostAttempt> = new Map()
   private redis = getRedisClient()
   private readonly HOST_TIMEOUT = 120000 // 2 min
+  private readonly HOST_COOLDOWN_SECONDS = 300 // 5 minutos
 
   private onHostSelectedCallback?: (matchId: string, hostOidUser: number, hostUsername: string, mapNumber: number) => void
   private onRoomConfirmedCallback?: (matchId: string, roomId: number, mapNumber: number) => void
@@ -58,8 +59,23 @@ export class HOSTManager {
 
     // Gera senha aleatória de 4 dígitos
     await this.redis.set(`match:${matchId}:hostPassword`, Math.floor(1000 + Math.random() * 9000).toString(), { EX: 7200 });
-    const sorted = [...players].sort((a, b) => b.mmr - a.mmr);
-    const hostPlayer = sorted[0];
+    const sorted = [...players].sort((a, b) => b.mmr - a.mmr)
+
+    let hostPlayer: HostPlayer | undefined
+    for (const candidate of sorted) {
+      const inCooldown = await this.isHostInCooldown(candidate.oidUser)
+      if (inCooldown) {
+        log('warn', `Pulando ${candidate.username} como HOST (cooldown ativo)`)
+        continue
+      }
+      hostPlayer = candidate
+      break
+    }
+
+    if (!hostPlayer) {
+      hostPlayer = sorted[0]
+      log('warn', 'Todos os jogadores estão em cooldown de HOST. Selecionando mesmo assim.')
+    }
 
     // --- GARANTA QUE ESTE BLOCO ESTÁ AQUI ---
     if (hostPlayer) {
@@ -173,6 +189,7 @@ export class HOSTManager {
   async abortByClient(matchId: string, hostOidUser: number, reason: string): Promise<void> {
     const attempt = this.activeHosts.get(matchId)
     const playerIds = attempt ? attempt.players.map(p => p.oidUser) : []
+    await this.applyHostCooldown(hostOidUser, reason)
     await this.abortAndCleanup(matchId, reason)
     if (this.onHostAbortedCallback) {
       this.onHostAbortedCallback(matchId, hostOidUser, reason, playerIds)
@@ -186,6 +203,7 @@ export class HOSTManager {
     const host = attempt.players[attempt.currentHostIndex]
     const elapsed = Date.now() - attempt.startedAt
     log('warn', `Timeout do HOST ${host?.username} no match ${matchId} (decorrido: ${(elapsed / 1000).toFixed(1)}s)`)
+    await this.applyHostCooldown(host?.oidUser || 0, 'TIMEOUT')
     await this.abortAndCleanup(matchId, 'TIMEOUT')
     if (this.onHostAbortedCallback) {
       const ids = attempt.players.map(p => p.oidUser)
@@ -198,6 +216,7 @@ export class HOSTManager {
     const attempt = this.activeHosts.get(matchId)
     if (!attempt) return
     const host = attempt.players[attempt.currentHostIndex]
+    await this.applyHostCooldown(host?.oidUser || 0, 'HOST_FAILED')
     await this.abortAndCleanup(matchId, 'HOST_FAILED')
     if (this.onHostAbortedCallback) {
       const ids = attempt.players.map(p => p.oidUser)
@@ -269,6 +288,28 @@ export class HOSTManager {
     }
     return undefined
   }
+
+  private async isHostInCooldown(oidUser: number): Promise<boolean> {
+    if (!oidUser) return false
+    try {
+      const ttl = await this.redis.ttl(`cooldown:host:${oidUser}`)
+      return ttl > 0
+    } catch (error) {
+      log('warn', `Falha ao consultar cooldown de host para ${oidUser}`, error)
+      return false
+    }
+  }
+
+  private async applyHostCooldown(oidUser: number, reason: string): Promise<void> {
+    if (!oidUser) return
+    try {
+      await this.redis.set(`cooldown:host:${oidUser}`, reason, { EX: this.HOST_COOLDOWN_SECONDS })
+      log('warn', `Aplicando cooldown de HOST para ${oidUser} (${reason})`)
+    } catch (error) {
+      log('warn', `Falha ao aplicar cooldown de host para ${oidUser}`, error)
+    }
+  }
+
   async clearAllAttempts(): Promise<void> {
     for (const [mid, attempt] of this.activeHosts.entries()) {
       clearTimeout(attempt.timeout)
