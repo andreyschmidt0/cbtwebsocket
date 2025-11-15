@@ -14,6 +14,8 @@ export class QueueManager {
   private isMatchmakingRunning: boolean = false // Proteção contra reentrada
   private onMatchFoundCallback?: (matchId: string, players: QueuePlayer[], teams: any) => void
   private readyManager?: ReadyManager
+  private currentRoleAllocation?: Map<number, TeamRole>
+  private currentRoleAutofill?: Set<number>
 
   constructor() {
     // Usa cliente Redis singleton (compartilhado com outros managers)
@@ -215,9 +217,8 @@ export class QueueManager {
 
 /**
    * Algoritmo de matchmaking (10 jogadores):
-   * - Considera MMR ±200 em torno do jogador mais antigo
-   * - Slots-alvo: 2x SNIPER, 8x "Rifles" (T1-T4 ou SMG)
-   * - Garante que os 8 "Rifles" não sejam SNIPER primário.
+   * - Considera janela de MMR dinâmica a partir do jogador mais antigo
+   * - Garante contrato de papéis (2 SNIPER, 2 T1...T4) antes do balanceamento
    */
   private async findMatch(): Promise<QueuePlayer[] | null> {
     const players = Array.from(this.queue.values())
@@ -225,38 +226,32 @@ export class QueueManager {
 
     if (players.length < 10) return null
 
-    const getClasses = (p: QueuePlayer) => p.classes || { primary: 'T3', secondary: 'SMG' } as any
+    const now = Date.now()
 
-    // Iterar por cada jogador (começando do mais antigo)
-    // e ver se podemos construir um match *ao redor dele*.
     for (let i = 0; i <= players.length - 10; i++) {
       const reference = players[i];
-      const mmrMin = reference.mmr - 200;
-      const mmrMax = reference.mmr + 200;
+      const waitMs = reference.queuedAt ? now - reference.queuedAt : 0
+      const window = this.getDynamicMMRWindow(reference, waitMs)
+      const mmrMin = reference.mmr - window;
+      const mmrMax = reference.mmr + window;
 
-      // Filtra o pool *completo* por MMR
-      const mmrPool = players.filter(p => p.mmr >= mmrMin && p.mmr <= mmrMax)
-      
-      if (mmrPool.length < 10) continue; // Pula para o próximo jogador de referência
-
-      // Dentro do pool de MMR, pega os 10 mais antigos (já ordenados do array original)
-      const picked = mmrPool.slice(0, 10);
-      
-      // *** ÚNICA REGRA: ***
-      // O grupo de 10 precisa ter pelo menos 2 jogadores que possam ser SNIPER
-      const sniperCandidates = picked.filter(p => {
-        const classes = getClasses(p);
-        return classes.primary === 'SNIPER' || classes.secondary === 'SNIPER';
-      });
-
-      if (sniperCandidates.length >= 2) {
-        // Encontramos um pool viável!
-        log('info', `? Match encontrado! (10) MMR range: ${mmrMin}-${mmrMax}`)
-        return picked; // Envia este pool de 10 para o buildStrictTeams
+      if (waitMs >= 30000 && (waitMs % 30000) < 4000) {
+        log('debug', `🎯 Expandindo janela para ±${window} (espera ${(waitMs / 1000).toFixed(0)}s) para ${reference.username}`)
       }
-      
-      // Se não tem 2 snipers, o loop 'for' continua e tenta
-      // construir um match ao redor do *próximo* jogador mais antigo.
+
+      const mmrPool = players.filter(p => p.mmr >= mmrMin && p.mmr <= mmrMax)
+      if (mmrPool.length < 10) {
+        continue
+      }
+
+      const picked = mmrPool.slice(0, Math.min(mmrPool.length, 25));
+      const allowHardAutofill = waitMs >= 120000
+      const rolePlayers = this.pickPlayersByRoleContract(picked, allowHardAutofill)
+
+      if (rolePlayers) {
+        log('info', `? Match encontrado! (10) MMR range: ${mmrMin}-${mmrMax} (papéis garantidos)`)
+        return rolePlayers;
+      }
     }
 
     log('debug', `? Matchmaking falhou: Não foi possível montar um grupo de 10 com 2 snipers.`)
@@ -271,13 +266,15 @@ export class QueueManager {
 
     // Guarda metadados da fila para requeue em caso de falha de host/ready
     try {
-      const snapshot = players.map(p => ({
-        oidUser: p.oidUser,
-        queuedAt: p.queuedAt || Date.now(),
-        classes: p.classes,
-        username: p.username,
-        mmr: p.mmr
-      }))
+    const snapshot = players.map(p => ({
+      oidUser: p.oidUser,
+      queuedAt: p.queuedAt || Date.now(),
+      classes: p.classes,
+      username: p.username,
+      mmr: p.mmr,
+      assignedRole: this.currentRoleAllocation?.get(p.oidUser),
+      wasAutofill: this.currentRoleAllocation ? this.wasAutofill(p, this.currentRoleAllocation.get(p.oidUser)) : false
+    }))
       await this.redis.set(`match:${matchId}:queueSnapshot`, JSON.stringify(snapshot), { EX: 7200 })
     } catch (err) {
       log('warn', `Falha ao armazenar snapshot da fila do match ${matchId}`, err as any)
@@ -351,7 +348,8 @@ export class QueueManager {
         const dataToStore = {
           primary: p.classes?.primary || 'T3',
           secondary: p.classes?.secondary || 'SMG',
-          assignedRole: p.assignedRole // <-- A INFORMAÇÃO CRÍTICA
+          assignedRole: p.assignedRole,
+          wasAutofill: this.wasAutofill(p, p.assignedRole)
         }
         classesMulti.hSet(key, p.oidUser.toString(), JSON.stringify(dataToStore))
       }
@@ -644,6 +642,122 @@ export class QueueManager {
     if (primary === 'SMG') return 2
     if (secondary === 'SMG') return 3
     return 4
+  }
+
+  private getDynamicMMRWindow(player: QueuePlayer, waitMs: number): number {
+    const tier = this.getMMRTier(player.mmr)
+    const config = tier === 'high'
+      ? { base: 50, growth: 25, max: 500 }
+      : tier === 'mid'
+        ? { base: 100, growth: 40, max: 500 }
+        : { base: 150, growth: 60, max: 500 }
+
+    const steps = Math.max(0, Math.floor(waitMs / 30000))
+    const window = config.base + steps * config.growth
+    return Math.min(window, config.max)
+  }
+
+  private getMMRTier(mmr: number): 'low' | 'mid' | 'high' {
+    if (mmr >= 2000) return 'high'
+    if (mmr >= 1400) return 'mid'
+    return 'low'
+  }
+
+  private pickPlayersByRoleContract(pool: QueuePlayer[], allowHardAutofill: boolean): QueuePlayer[] | null {
+    const requiredPerRole: Record<TeamRole, number> = {
+      SNIPER: 2,
+      T1: 2,
+      T2: 2,
+      T3: 2,
+      T4: 2
+    }
+    const selected = new Set<number>()
+    const result: QueuePlayer[] = []
+    this.currentRoleAllocation = new Map()
+    this.currentRoleAutofill = new Set<number>()
+
+    for (const role of ['SNIPER', 'T1', 'T2', 'T3', 'T4'] as TeamRole[]) {
+      let filled = this.selectForRole(pool, role, selected, result, requiredPerRole[role], 'primary', allowHardAutofill)
+      if (filled < requiredPerRole[role]) {
+        filled += this.selectForRole(pool, role, selected, result, requiredPerRole[role] - filled, 'secondary', allowHardAutofill)
+      }
+      if (role !== 'SNIPER' && filled < requiredPerRole[role]) {
+        filled += this.selectForRole(pool, role, selected, result, requiredPerRole[role] - filled, 'flex', allowHardAutofill)
+      }
+      if (filled < requiredPerRole[role]) {
+        return null
+      }
+    }
+
+    if (result.length !== 10) {
+      this.currentRoleAllocation.clear()
+      this.currentRoleAutofill.clear()
+      return null
+    }
+    return result
+  }
+
+  private selectForRole(
+    pool: QueuePlayer[],
+    role: TeamRole,
+    selected: Set<number>,
+    result: QueuePlayer[],
+    needed: number,
+    mode: 'primary' | 'secondary' | 'flex',
+    allowHardAutofill: boolean
+  ): number {
+    if (needed <= 0) return 0
+    const candidates = pool
+      .filter(p => !selected.has(p.oidUser))
+      .filter(p => {
+        const classes = p.classes || { primary: 'T3', secondary: 'SMG' } as const
+        if (mode === 'primary') {
+          return classes.primary === role
+        }
+        if (mode === 'secondary') {
+          if (role === 'SNIPER') {
+            return classes.secondary === 'SNIPER'
+          }
+          return classes.secondary === role
+        }
+        if (role === 'SNIPER') {
+          return false
+        }
+        if (!allowHardAutofill) {
+          return classes.primary === 'SMG' || classes.secondary === 'SMG'
+        }
+        return true
+      })
+      .sort((a, b) => {
+        const timeDiff = (a.queuedAt || 0) - (b.queuedAt || 0)
+        if (timeDiff !== 0) return timeDiff
+        return b.mmr - a.mmr
+      })
+
+    let filled = 0
+    for (const player of candidates) {
+      result.push(player)
+      selected.add(player.oidUser)
+      this.currentRoleAllocation?.set(player.oidUser, role)
+      if (mode === 'flex') {
+        this.currentRoleAutofill?.add(player.oidUser)
+      }
+      filled++
+      if (filled >= needed) break
+    }
+    return filled
+  }
+
+  private wasAutofill(player: QueuePlayer, assignedRole?: TeamRole): boolean {
+    if (!assignedRole) return false
+    if (!player.classes) return false
+    const primary = player.classes.primary
+    const secondary = player.classes.secondary
+    if (assignedRole === 'SNIPER' && primary === 'SNIPER') return false
+    if (assignedRole === 'SNIPER' && secondary === 'SNIPER') return false
+    if (assignedRole === primary) return false
+    if (assignedRole === secondary) return false
+    return true
   }
 
   /** Gerar ID sequencial via Redis */
