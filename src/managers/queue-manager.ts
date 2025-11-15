@@ -372,7 +372,14 @@ private async findMatch(): Promise<QueuePlayer[] | null> {
       return strict
     }
 
-    log('warn', '⚠️ Não foi possível balancear tiers respeitando todas as regras')
+    log('warn', '⚠️ Não foi possível balancear tiers respeitando todas as regras. Ativando fallback de autofill.')
+    const autofillTeams = this.buildAutoFillTeams(players)
+    if (autofillTeams) {
+      log('info', '🛟 Autofill habilitado: usando tiers secundários/flex para completar os times')
+      return autofillTeams
+    }
+
+    log('warn', '⚠️ Nem mesmo o autofill conseguiu montar os times.')
     return null
   }
 
@@ -496,6 +503,79 @@ private async findMatch(): Promise<QueuePlayer[] | null> {
     log('warn', `⚠️ buildStrictTeams falhou. O pool de 10 jogadores do findMatch pode não ter as classes únicas necessárias.`)
     return null
   }
+
+  /**
+   * Fallback de autofill: usa tiers secundários ou força flex se não houver combinação perfeita.
+   */
+  private buildAutoFillTeams(players: QueuePlayer[]): { ALPHA: { player: QueuePlayer, role: TeamRole }[], BRAVO: { player: QueuePlayer, role: TeamRole }[] } | null {
+    const slots: Array<{ team: 'ALPHA' | 'BRAVO'; role: TeamRole }> = [
+      { team: 'ALPHA', role: 'SNIPER' }, { team: 'BRAVO', role: 'SNIPER' },
+      { team: 'ALPHA', role: 'T1' }, { team: 'BRAVO', role: 'T1' },
+      { team: 'ALPHA', role: 'T2' }, { team: 'BRAVO', role: 'T2' },
+      { team: 'ALPHA', role: 'T3' }, { team: 'BRAVO', role: 'T3' },
+      { team: 'ALPHA', role: 'T4' }, { team: 'BRAVO', role: 'T4' }
+    ]
+
+    const sortedPlayers = [...players].sort((a, b) => (a.queuedAt || 0) - (b.queuedAt || 0))
+    const usedPlayer = new Set<number>()
+    const alpha: { player: QueuePlayer, role: TeamRole }[] = []
+    const bravo: { player: QueuePlayer, role: TeamRole }[] = []
+    let best: TeamAssignment | null = null
+
+    const tryAssign = (slotIndex: number, alphaMMR: number, bravoMMR: number): boolean => {
+      if (slotIndex === slots.length) {
+        const diff = Math.abs(alphaMMR - bravoMMR)
+        if (!best || diff < best.diff) {
+          best = { diff, alpha: [...alpha], bravo: [...bravo] }
+        }
+        return diff === 0
+      }
+
+      const slot = slots[slotIndex]
+      const candidates = sortedPlayers
+        .filter(p => !usedPlayer.has(p.oidUser))
+        .map(player => ({
+          player,
+          priority: this.getAutofillPriority(player, slot.role)
+        }))
+        .filter(c => c.priority !== null)
+        .sort((a, b) => {
+          const priorityDiff = (a.priority ?? 0) - (b.priority ?? 0)
+          if (priorityDiff !== 0) return priorityDiff
+          const queuedDiff = (a.player.queuedAt || 0) - (b.player.queuedAt || 0)
+          if (queuedDiff !== 0) return queuedDiff
+          return b.player.mmr - a.player.mmr
+        })
+
+      if (candidates.length === 0) {
+        return false
+      }
+
+      for (const candidate of candidates) {
+        usedPlayer.add(candidate.player.oidUser)
+        if (slot.team === 'ALPHA') {
+          alpha.push({ player: candidate.player, role: slot.role })
+          if (tryAssign(slotIndex + 1, alphaMMR + candidate.player.mmr, bravoMMR)) return true
+          alpha.pop()
+        } else {
+          bravo.push({ player: candidate.player, role: slot.role })
+          if (tryAssign(slotIndex + 1, alphaMMR, bravoMMR + candidate.player.mmr)) return true
+          bravo.pop()
+        }
+        usedPlayer.delete(candidate.player.oidUser)
+      }
+
+      return false
+    }
+
+    tryAssign(0, 0, 0)
+    const finalBest = best as TeamAssignment | null
+    if (finalBest && finalBest.alpha.length === 5 && finalBest.bravo.length === 5) {
+      return { ALPHA: finalBest.alpha, BRAVO: finalBest.bravo }
+    }
+
+    return null
+  }
   /**
    * Determina prioridade de um jogador para ocupar um papel específico.
    */
@@ -525,6 +605,27 @@ private async findMatch(): Promise<QueuePlayer[] | null> {
     
     // Classes secundárias NÃO são mais usadas para preencher T1-T4
     return null
+  }
+
+  /**
+   * Versão flexível usada pelo autofill para permitir swaps forçados.
+   */
+  private getAutofillPriority(player: QueuePlayer, role: TeamRole): number | null {
+    const classes = player.classes || { primary: 'T3', secondary: 'SMG' } as const
+    const primary = classes.primary
+    const secondary = classes.secondary
+
+    if (role === 'SNIPER') {
+      if (primary === 'SNIPER') return 0
+      if (secondary === 'SNIPER') return 1
+      return null
+    }
+
+    if (primary === role) return 0
+    if (secondary === role) return 1
+    if (primary === 'SMG') return 2
+    if (secondary === 'SMG') return 3
+    return 4
   }
 
   /** Gerar ID sequencial via Redis */
