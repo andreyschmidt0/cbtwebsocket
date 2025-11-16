@@ -47,6 +47,7 @@ export class RankedWebSocketServer {
   private redis = getRedisClient();
   private wss: WebSocketServer;
   private clients: Map<number, AuthenticatedWebSocket> = new Map();
+  private heartbeatInterval?: NodeJS.Timeout;
 
   // Managers
   private queueManager: QueueManager;
@@ -298,6 +299,7 @@ export class RankedWebSocketServer {
 
     // 7. Configurar o Servidor WebSocket
     this.setupWebSocketServer();
+    this.startHeartbeat();
 
     log('debug', `🚀 Ranked WebSocket Server pronto.`);
   }
@@ -728,7 +730,28 @@ this.readyManager.onReadyFailed(async (
     })
   }
 
-  // setupHeartbeat removido
+  private startHeartbeat(): void {
+    if (this.heartbeatInterval) return
+    this.heartbeatInterval = setInterval(() => {
+      this.wss.clients.forEach((client) => {
+        const socket = client as AuthenticatedWebSocket
+        if (socket.isAlive === false) {
+          log('warn', `⚠️ Encerrando conexão inativa (${socket.oidUser ?? 'unknown'})`)
+          socket.terminate()
+          return
+        }
+
+        socket.isAlive = false
+        if (socket.readyState === WebSocket.OPEN) {
+          try {
+            socket.ping()
+          } catch (error) {
+            log('warn', 'Falha ao enviar ping para cliente', error)
+          }
+        }
+      })
+    }, 30000)
+  }
 
   /**
    * Processar mensagem recebida
@@ -786,11 +809,11 @@ this.readyManager.onReadyFailed(async (
           await this.handleChatSend(ws, payload)
           break
 		  
-		case 'LOBBY_REQUEST_SWAP':
+		    case 'LOBBY_REQUEST_SWAP':
           await this.handleLobbyRequestSwap(ws, payload)
           break
 		  
-		case 'LOBBY_ACCEPT_SWAP':
+		    case 'LOBBY_ACCEPT_SWAP':
           await this.handleLobbyAcceptSwap(ws, payload)
           break
 
@@ -1603,6 +1626,11 @@ private async validateAuthToken(params: TokenValidationParams): Promise<TokenVal
    */
   async shutdown(): Promise<void> {
     log('debug', '🛑 Encerrando Ranked WebSocket Server...')
+
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval)
+      this.heartbeatInterval = undefined
+    }
 
     // Para managers (limpa timers e intervals)
     this.queueManager.stop()

@@ -385,18 +385,38 @@ export class QueueManager {
     const strict = this.buildStrictTeams(players)
     if (strict) {
       log('info', '✅ Times balanceados com regras completas de tier')
-      return strict
+      return this.randomizeTeamOrder(strict)
     }
 
     log('warn', '⚠️ Não foi possível balancear tiers respeitando todas as regras. Ativando fallback de autofill.')
     const autofillTeams = this.buildAutoFillTeams(players)
     if (autofillTeams) {
       log('info', '🛟 Autofill habilitado: usando tiers secundários/flex para completar os times')
-      return autofillTeams
+      return this.randomizeTeamOrder(autofillTeams)
     }
 
     log('warn', '⚠️ Nem mesmo o autofill conseguiu montar os times.')
     return null
+  }
+
+  /**
+   * Embaralha a ordem dos jogadores em cada time para evitar que o mesmo papel
+   * (ex.: sniper) seja sempre o primeiro/leader na UI.
+   */
+  private randomizeTeamOrder(teams: { ALPHA: { player: QueuePlayer, role: TeamRole }[], BRAVO: { player: QueuePlayer, role: TeamRole }[] }) {
+    return {
+      ALPHA: this.shuffleTeam(teams.ALPHA),
+      BRAVO: this.shuffleTeam(teams.BRAVO)
+    }
+  }
+
+  private shuffleTeam<T>(arr: T[]): T[] {
+    const copy = [...arr]
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[copy[i], copy[j]] = [copy[j], copy[i]]
+    }
+    return copy
   }
 
 /**
