@@ -631,6 +631,7 @@ export class ValidationManager {
       await this.redis.del(`match:${matchId}:room`)
       await this.redis.del(`match:${matchId}:status`)
       await this.redis.del(`match:${matchId}:host`)
+      await this.redis.del(`match:${matchId}:hostPassword`)
       await this.redis.del(`room:${matchId}`) // (Chave que você viu)
 
       // Chave do ReadyManager

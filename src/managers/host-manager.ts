@@ -246,6 +246,8 @@ export class HOSTManager {
       await this.redis.del(`match:${matchId}:status`)
       await this.redis.del(`match:${matchId}:endReason`)
       await this.redis.del(`match:${matchId}:room`)
+      await this.redis.del(`match:${matchId}:hostPassword`)
+      await this.redis.del(`room:${matchId}`)
       await this.redis.del(`match:${matchId}:queueSnapshot`)
       await this.redis.del(`match:${matchId}:classes`)
       await this.redis.del(`lobby:temp:${matchId}`)
@@ -315,6 +317,8 @@ export class HOSTManager {
       clearTimeout(attempt.timeout)
       await this.redis.del(`match:${mid}:host`)
       await this.redis.del(`match:${mid}:room`)
+      await this.redis.del(`match:${mid}:hostPassword`)
+      await this.redis.del(`room:${mid}`)
     }
     this.activeHosts.clear()
     log('info', 'Todas as tentativas de HOST limpas')
