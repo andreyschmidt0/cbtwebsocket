@@ -103,7 +103,8 @@ export class RankedWebSocketServer {
       onMatchCompleted: async (matchId, result) => {
         log('debug', `✅ Match ${matchId} validado! Vencedor: ${result.winner}`);
 
-        // ... (lógica de onMatchCompleted - sem mudanças) ...
+		await this.redis.publish("discord:actions", JSON.stringify({ type: 'DELETE_CHANNELS', matchId: matchId }));
+
         // Busca jogadores e stats da partida (inclui MMR já atualizado)
         const matchPlayers = await prismaRanked.$queryRaw<any[]>`
           SELECT 
@@ -669,7 +670,29 @@ this.readyManager.onReadyFailed(async (
         ...lobby.teams.ALPHA.map(p => p.oidUser),
         ...lobby.teams.BRAVO.map(p => p.oidUser)
       ];
-      // --- FIM DA CORREÇÃO ---
+
+	try {
+			// Prepara dados dos times com os Discord IDs (essencial para o bot)
+			const getTeamDiscordIds = (team: 'ALPHA' | 'BRAVO') => {
+			  return lobby.teams[team].map(p => {
+				const client = this.clients.get(p.oidUser);
+				return { oidUser: p.oidUser, discordId: client?.discordId };
+			  }).filter(p => p.discordId); // Filtra quem não tem discordId
+			};
+
+			const teamsPayload = {
+			  alpha: getTeamDiscordIds('ALPHA'),
+			  bravo: getTeamDiscordIds('BRAVO')
+			};
+
+			await this.redis.publish("discord:actions", JSON.stringify({
+			  type: 'CREATE_CHANNELS',
+			  matchId: matchId,
+			  teams: teamsPayload
+			}));
+		  } catch (e) {
+			log('error', `Falha ao publicar CREATE_CHANNELS no Redis para match ${matchId}`, e);
+		  }
 
       // Recupera senha do Redis
       const hostPassword = await this.redis.get(`match:${matchId}:hostPassword`);
@@ -809,13 +832,24 @@ this.readyManager.onReadyFailed(async (
           await this.handleChatSend(ws, payload)
           break
 		  
-		    case 'LOBBY_REQUEST_SWAP':
+		case 'LOBBY_REQUEST_SWAP':
           await this.handleLobbyRequestSwap(ws, payload)
           break
 		  
-		    case 'LOBBY_ACCEPT_SWAP':
+		case 'LOBBY_ACCEPT_SWAP':
           await this.handleLobbyAcceptSwap(ws, payload)
           break
+		  
+		case 'LOBBY_ACCEPT_VOICE_TRANSFER':
+		  if (ws.oidUser && ws.discordId && payload.matchId) {
+			this.redis.publish("discord:actions", JSON.stringify({
+			  type: 'MOVE_PLAYER',
+			  oidUser: ws.oidUser,
+			  discordId: ws.discordId,
+			  matchId: payload.matchId
+			}));
+		  }
+		  break;
 
         default:
           log('warn', `⚠️ Mensagem desconhecida: ${message.type}`)
