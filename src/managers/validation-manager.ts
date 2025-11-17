@@ -56,7 +56,7 @@ export class ValidationManager {
   private readonly NORMAL_INTERVAL = 30000 // 30 segundos
   private readonly AGGRESSIVE_INTERVAL = 10000 // 10 segundos
   private readonly AGGRESSIVE_THRESHOLD = 10 * 60 * 1000 // 10 minutos
-  private readonly MAX_ATTEMPTS = 40 // 20 minutos no normal polling
+  private readonly MAX_ATTEMPTS = 60 // 30 minutos no normal polling
   private readonly MIN_LOGS_REQUIRED = 6 // Mínimo de logs para considerar partida finalizada
 
   constructor(callbacks: ValidationCallbacks = {}) {
@@ -290,7 +290,7 @@ export class ValidationManager {
     validation.lastCheck = now
 
     const elapsedTime = now.getTime() - startedAt.getTime()
-    if (validation.attempts >= this.MAX_ATTEMPTS || elapsedTime > 20 * 60 * 1000) {
+    if (validation.attempts >= this.MAX_ATTEMPTS || elapsedTime > 30 * 60 * 1000) {
       await this.handleMatchTimeout(matchId)
       return
     }
@@ -645,10 +645,10 @@ export class ValidationManager {
   }
 
   /**
-   * Trata timeout de validação (20 minutos sem logs)
+   * Trata timeout de validação (30 minutos sem logs)
    */
   private async handleMatchTimeout(matchId: string): Promise<void> {
-    log('warn', `⏰ Match ${matchId} timeout (20 minutos sem logs suficientes)`)
+    log('warn', `⏰ Match ${matchId} timeout (30 minutos sem logs suficientes)`)
     
     try {
       // **CORREÇÃO**: Apenas atualiza o match existente para 'cancelled'
