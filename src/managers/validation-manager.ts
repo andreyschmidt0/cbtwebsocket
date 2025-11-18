@@ -231,8 +231,14 @@ export class ValidationManager {
     const oldestStartTime = new Date(Math.min(...matches.map(m => m.startedAt.getTime())))
     const now = new Date()
     const checkFrom = this.lastGlobalCheck > oldestStartTime ? this.lastGlobalCheck : oldestStartTime
+    const expectedOids = Array.from(new Set(matches.flatMap(m => m.expectedPlayers)))
 
-    log('debug', `📅 Buscando logs desde ${checkFrom.toISOString()} até ${now.toISOString()}`)
+    if (expectedOids.length === 0) {
+      log('warn', 'Nenhum oidUser esperado encontrado para validacao corrente.')
+      return []
+    }
+
+    log('debug', `Buscando logs desde ${checkFrom.toISOString()} ate ${now.toISOString()} para oidUsers: ${expectedOids.join(', ')}`)
     try {
       const logs = await prismaRanked.$queryRaw<MatchLog[]>`
         SELECT
@@ -249,11 +255,12 @@ export class ValidationManager {
           AND IsValid = 1
           AND LogDate >= ${checkFrom}
           AND LogDate <= ${now}
+          AND oidUser IN (${Prisma.join(expectedOids)})
         ORDER BY LogDate DESC
       `
       return logs
     } catch (error) {
-      log('error', '❌ Erro ao buscar logs do BST_Fullmatchlog', error)
+      log('error', 'Erro ao buscar logs do BST_Fullmatchlog', error)
       return []
     }
   }
@@ -335,6 +342,9 @@ export class ValidationManager {
       const abandonments = expectedPlayers.filter(oid => !playersWhoPlayed.includes(oid))
 
       log('info', `📊 Match ${matchId}: ${playersWhoPlayed.length}/${expectedPlayers.length} jogaram, ${abandonments.length} abandonos`)
+      if (abandonments.length > 0) {
+        log('warn', `Jogadores ausentes punidos: ${abandonments.join(', ')}`)
+      }
 
       const validationResult = await this.validateTeams(matchId, logs, playerTeamList, abandonments)
 
