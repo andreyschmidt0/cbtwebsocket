@@ -332,7 +332,7 @@ export class QueueManager {
         },
         createdAt: Date.now()
       }),
-      { EX: 300 }
+      { EX: 3600 }
     )
 
     // Salva classes por jogador para uso na lobby (sobrevive ao ready)
@@ -782,7 +782,13 @@ export class QueueManager {
 
   /** Gerar ID sequencial via Redis */
   private async generateMatchId(): Promise<string> {
-    const matchNumber = await this.redis.incr('match:counter')
+    const counterKey = 'match:counter'
+    const matchNumber = await this.redis.incr(counterKey)
+    try {
+      await this.redis.expire(counterKey, 60 * 60 * 24) // expira em 24h após o último uso
+    } catch (error) {
+      log('warn', 'Falha ao aplicar TTL em match:counter', error)
+    }
     return matchNumber.toString()
   }
 

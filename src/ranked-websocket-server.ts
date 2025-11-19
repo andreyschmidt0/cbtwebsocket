@@ -363,17 +363,16 @@ export class RankedWebSocketServer {
 
         log('debug', `ℹ️ Match ${matchId} tem ${matchPlayers.length} jogadores`)
 
-        // Separa times e anonimiza usernames
-        // (Buscamos o MMR real do objeto, não mais o '1000' fixo)
+        // Separa times usando os nomes reais (anonimização será feita ao enviar ao cliente)
         const teams = {
-          ALPHA: teamsData.ALPHA.map((p: any, index: number) => ({
+          ALPHA: teamsData.ALPHA.map((p: any) => ({
             oidUser: p.oidUser,
-            username: `Player ${index + 1}`,
+            username: p.username,
             mmr: Number(p.mmr) || 1000
           })),
-          BRAVO: teamsData.BRAVO.map((p: any, index: number) => ({
+          BRAVO: teamsData.BRAVO.map((p: any) => ({
             oidUser: p.oidUser,
-            username: `Player ${index + 1}`,
+            username: p.username,
             mmr: Number(p.mmr) || 1000
           }))
         }
@@ -1268,13 +1267,39 @@ this.readyManager.onReadyFailed(async (
       }
     }
     // *** FIM DA CORREÇÃO DE SEGURANÇA ***
+
+    const buildAnonymizedTeams = (viewerTeam: 'ALPHA' | 'BRAVO') => {
+      let opponentCounter = 1
+      const anonymized = {
+        ALPHA: [] as typeof lobby.teams.ALPHA,
+        BRAVO: [] as typeof lobby.teams.BRAVO
+      }
+
+      ;(['ALPHA', 'BRAVO'] as const).forEach(teamKey => {
+        anonymized[teamKey] = lobby.teams[teamKey].map(player => {
+          const isTeammate = teamKey === viewerTeam
+          const username = isTeammate
+            ? player.username
+            : `Player ${String(opponentCounter++).padStart(2, '0')}`
+
+          return {
+            ...player,
+            username
+          }
+        })
+      })
+
+      return anonymized
+    }
+
+    const teamsForClient = buildAnonymizedTeams(playerTeam)
     const mapPool = this.lobbyManager.getRankedMapPool(); // <-- ADICIONE ESTA LINHA
 
     this.sendMessage(ws, {
       type: 'LOBBY_DATA',
       payload: {
         matchId: lobby.matchId,
-        teams: lobby.teams,
+        teams: teamsForClient,
         vetoedMaps: lobby.vetoedMaps,
         vetoHistory: lobby.vetoHistory,
         currentTurn: lobby.currentTurn,

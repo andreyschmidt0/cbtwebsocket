@@ -508,13 +508,14 @@ export class ValidationManager {
     const allPlayers = [...playerTeams.ALPHA, ...playerTeams.BRAVO]
     
     // Busca MMR atual (fallback para MMR do lobbyData)
-    const playersMMR: { oidUser: number, currentMMR: number, matchesPlayed: number }[] = [];
+    const playersMMR: { oidUser: number, currentMMR: number, matchesPlayed: number, placementCompleted: boolean }[] = [];
     try {
       const playerOids = allPlayers.map((p: any) => p.oidUser);
       const mmrResults = await prismaRanked.$queryRaw<any[]>`
         SELECT oidUser, 
                ISNULL(eloRating, 1000) as currentMMR,
-               ISNULL(matchesPlayed, 0) as matchesPlayed
+               ISNULL(matchesPlayed, 0) as matchesPlayed,
+               ISNULL(placementCompleted, 1) as placementCompleted
         FROM BST_RankedUserStats
         WHERE oidUser IN (${Prisma.join(playerOids)})
       `
@@ -524,7 +525,8 @@ export class ValidationManager {
         playersMMR.push({
           oidUser: player.oidUser,
           currentMMR: stats?.currentMMR || player.mmr || 1000,
-          matchesPlayed: stats?.matchesPlayed || 0
+          matchesPlayed: stats?.matchesPlayed || 0,
+          placementCompleted: stats?.placementCompleted === 1
         });
       }
     } catch (e) {
@@ -533,7 +535,8 @@ export class ValidationManager {
         playersMMR.push({
           oidUser: player.oidUser,
           currentMMR: player.mmr || 1000,
-          matchesPlayed: 0
+          matchesPlayed: 0,
+          placementCompleted: true
         });
       }
     }
@@ -566,6 +569,7 @@ export class ValidationManager {
         team,
         currentMMR: mmrData?.currentMMR || 1000,
         matchesPlayed: mmrData?.matchesPlayed || 0,
+        placementCompleted: mmrData?.placementCompleted ?? false,
         kills: playerLog?.KillCnt || 0,
         deaths: playerLog?.DeadCnt || 0,
         assists: playerLog?.Assist || 0,
@@ -588,15 +592,16 @@ export class ValidationManager {
     for (const mmrResult of mmrResults) {
       const pData = playersData.find(p => p.oidUser === mmrResult.oidUser);
       if (!pData) continue;
+      const seedingBonus = mmrResult.breakdown?.placementSeedingBonus || 0;
       
       try {
         await prismaRanked.$executeRaw`
           INSERT INTO BST_MatchPlayer 
-            (matchId, oidUser, team, kills, deaths, assists, headshots, mmrChange, confirmedResult, confirmedAt)
+            (matchId, oidUser, team, kills, deaths, assists, headshots, mmrChange, placementSeedingBonus, confirmedResult, confirmedAt)
           VALUES 
             (${matchId}, ${pData.oidUser}, ${pData.team}, 
              ${pData.kills}, ${pData.deaths}, ${pData.assists}, ${pData.headshots}, 
-             ${mmrResult.change}, 1, GETDATE())
+             ${mmrResult.change}, ${seedingBonus}, 1, GETDATE())
         `
       } catch (e) {
         log('error', `Falha ao INSERIR BST_MatchPlayer para ${pData.oidUser} no match ${matchId}`, e);
@@ -605,7 +610,12 @@ export class ValidationManager {
 
     // 5. ATUALIZA (MERGE) o BST_RankedUserStats
     for (const mmrResult of mmrResults) {
-      const didWin = playersData.find(p => p.oidUser === mmrResult.oidUser)?.didWin || false
+      const playerSnapshot = playersData.find(p => p.oidUser === mmrResult.oidUser)
+      const didWin = playerSnapshot?.didWin || false
+      const seedingBonus = mmrResult.breakdown?.placementSeedingBonus || 0
+      const matchesBefore = playerSnapshot?.matchesPlayed || 0
+      const matchesAfter = matchesBefore + 1
+      const completedPlacement = seedingBonus > 0 || matchesAfter >= MatchValidator.CONFIG.PLACEMENT_MATCHES
       
       try {
         await prismaRanked.$executeRaw`
@@ -618,10 +628,14 @@ export class ValidationManager {
               matchesPlayed = matchesPlayed + 1,
               matchesWon = matchesWon + ${didWin ? 1 : 0},
               lastMatchAt = GETDATE(),
-              updatedAt = GETDATE()
+              updatedAt = GETDATE(),
+              placementCompleted = CASE 
+                WHEN placementCompleted = 1 THEN 1 
+                ELSE ${completedPlacement ? 1 : 0}
+              END
           WHEN NOT MATCHED THEN
-            INSERT (oidUser, eloRating, matchesPlayed, matchesWon, lastMatchAt)
-            VALUES (${mmrResult.oidUser}, ${mmrResult.newMMR}, 1, ${didWin ? 1 : 0}, GETDATE());
+            INSERT (oidUser, eloRating, matchesPlayed, matchesWon, lastMatchAt, placementCompleted)
+            VALUES (${mmrResult.oidUser}, ${mmrResult.newMMR}, 1, ${didWin ? 1 : 0}, GETDATE(), ${completedPlacement ? 1 : 0});
         `
         log('debug', `💾 ${mmrResult.username}: ${mmrResult.oldMMR} → ${mmrResult.newMMR} (${mmrResult.change >= 0 ? '+' : ''}${mmrResult.change})`)
       } catch (e) {

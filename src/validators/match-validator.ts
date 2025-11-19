@@ -11,7 +11,7 @@ const MMR_CONFIG = {
 
   // Fator K (sensibilidade de mudança)
   K_FACTOR: {
-    PLACEMENT: 40,     // Primeiras 10 partidas (alta volatilidade)
+    PLACEMENT: 60,     // Primeiras 10 partidas (alta volatilidade)
     NEW_PLAYER: 32,    // Até 50 partidas
     EXPERIENCED: 24,   // 50-200 partidas
     VETERAN: 16        // 200+ partidas
@@ -30,6 +30,9 @@ const MMR_CONFIG = {
     HEADSHOT_ACCURACY: 0.20   // 20% - % headshots
   },
 
+  PLACEMENT_JUMP_THRESHOLD: 3.0,
+  PLACEMENT_SELECTION_MMR: 300,
+
   // Limites
   MIN_MMR: 0,
   MAX_MMR: 3000,
@@ -45,6 +48,7 @@ export interface PlayerMatchData {
   team: 'ALPHA' | 'BRAVO'
   currentMMR: number
   matchesPlayed: number
+  placementCompleted?: boolean
   
   // Performance individual (do BST_Fullmatchlog)
   kills: number
@@ -72,6 +76,7 @@ export interface MMRCalculationResult {
     disadvantageBonus: number
     abandonPenalty: number
     winStreakBonus: number
+    placementSeedingBonus: number
   }
 }
 
@@ -123,7 +128,8 @@ export class MatchValidator {
             performanceBonus: 0,
             disadvantageBonus: 0,
             abandonPenalty: MMR_CONFIG.ABANDON_PENALTY,
-            winStreakBonus: 0
+            winStreakBonus: 0,
+            placementSeedingBonus: 0
           }
         }
       }
@@ -153,11 +159,25 @@ export class MatchValidator {
       // TODO: Implementar win streak bonus (requer histórico de partidas)
       const winStreakBonus = 0
 
+      let placementSeedingBonus = 0
+      let maxChange = MMR_CONFIG.MAX_MMR_CHANGE
+
+      const isPlacementMatch = !player.placementCompleted && player.matchesPlayed < MMR_CONFIG.PLACEMENT_MATCHES
+      if (isPlacementMatch && player.didWin) {
+        const totalKda = player.kills + player.assists
+        const kdaRatio = player.deaths > 0 ? totalKda / player.deaths : totalKda
+        if (kdaRatio >= MMR_CONFIG.PLACEMENT_JUMP_THRESHOLD) {
+          placementSeedingBonus = MMR_CONFIG.PLACEMENT_SELECTION_MMR
+          maxChange = Math.max(maxChange, placementSeedingBonus)
+          log('info', `🚀 Jogador ${player.username} (MD10) atingiu KDA ${kdaRatio.toFixed(2)}. Aplicando bônus +${placementSeedingBonus}.`)
+        }
+      }
+
       // Soma todos os componentes
-      let totalChange = baseChange + performanceBonus + disadvantageBonus + winStreakBonus
+      let totalChange = baseChange + performanceBonus + disadvantageBonus + winStreakBonus + placementSeedingBonus
 
       // Aplica limites
-      totalChange = Math.max(-MMR_CONFIG.MAX_MMR_CHANGE, Math.min(MMR_CONFIG.MAX_MMR_CHANGE, totalChange))
+      totalChange = Math.max(-maxChange, Math.min(maxChange, totalChange))
 
       const newMMR = Math.max(
         MMR_CONFIG.MIN_MMR,
@@ -175,7 +195,8 @@ export class MatchValidator {
           performanceBonus: Math.round(performanceBonus),
           disadvantageBonus: Math.round(disadvantageBonus),
           abandonPenalty: 0,
-          winStreakBonus: Math.round(winStreakBonus)
+          winStreakBonus: Math.round(winStreakBonus),
+          placementSeedingBonus: Math.round(placementSeedingBonus)
         }
       }
     })
