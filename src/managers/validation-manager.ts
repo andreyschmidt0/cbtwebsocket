@@ -1,8 +1,8 @@
 import { getRedisClient, isRedisReady } from '../database/redis-client'
-import { prismaRanked } from '../database/prisma'
+import { prismaRanked, prismaGame } from '../database/prisma'
 import { log } from '../utils/logger'
-import { MatchValidator } from '../validators/match-validator'
-import type { PlayerMatchData } from '../validators/match-validator'
+import { calculateRankChanges, RankCalculationPlayerInput, PlayerPenaltyImpact, PlayerRankState } from '../rank/rank-calculator'
+import { computeMatchmakingValue, DEFAULT_TIER, getBackgroundIdForTier, RankTier } from '../rank/rank-tiers'
 import { Prisma } from '@prisma/client'
 
 interface MatchValidation {
@@ -23,7 +23,12 @@ interface MatchLog {
   DeadCnt: number
   HeadShotCnt: number
   Assist: number
+  Exp: number
+  Money: number
+  Forfeited: number
   LogDate: Date
+  BombsPlanted: number
+  BombsDefused: number
 }
 
 interface ValidationResult {
@@ -34,10 +39,33 @@ interface ValidationResult {
   reason?: string
 }
 
+type PlayerPenaltyReason = 'FORFEIT' | 'ZERO_REWARD' | 'NO_LOG'
+
+interface PlayerPenaltyInfo {
+  reason: PlayerPenaltyReason
+  detectedAt: Date
+  lastLogDate?: Date
+  evidence?: 'FORFEITED' | 'ZERO_REWARD' | 'NO_LOG'
+}
+
 interface ValidationCallbacks {
   onMatchCompleted?: (matchId: string, result: ValidationResult) => Promise<void>
   onMatchTimeout?: (matchId: string) => Promise<void>
   onMatchInvalid?: (matchId: string, reason: string) => Promise<void>
+}
+
+function mapPenaltyToImpact(info?: PlayerPenaltyInfo): PlayerPenaltyImpact | undefined {
+  if (!info) return undefined
+  switch (info.reason) {
+    case 'FORFEIT':
+      return { points: -25, reason: info.reason }
+    case 'ZERO_REWARD':
+      return { points: -10, reason: info.reason }
+    case 'NO_LOG':
+      return { points: -5, reason: info.reason }
+    default:
+      return undefined
+  }
 }
 
 /**
@@ -51,6 +79,8 @@ export class ValidationManager {
   private lastGlobalCheck: Date = new Date()
   private redis: ReturnType<typeof getRedisClient>
   private redisAvailable: boolean = false
+  private playerPenalties: Map<string, Map<number, PlayerPenaltyInfo>> = new Map()
+  private matchLogsCache: Map<string, Map<number, MatchLog>> = new Map()
 
   // Configurações
   private readonly NORMAL_INTERVAL = 30000 // 30 segundos
@@ -124,6 +154,8 @@ export class ValidationManager {
       status: 'monitoring',
       expectedPlayers
     })
+    this.playerPenalties.set(matchId, new Map())
+    this.matchLogsCache.set(matchId, new Map())
 
     await this.redisSet(
       `validation:${matchId}`,
@@ -146,6 +178,7 @@ export class ValidationManager {
    * Cancela validação manualmente
    */
   async cancelValidation(matchId: string): Promise<void> {
+    await this.clearMatchCaches(matchId)
     this.activeMatches.delete(matchId)
     await this.redisDel(`validation:${matchId}`)
     log('info', `🛑 Validação parada: Match ${matchId}`)
@@ -249,6 +282,9 @@ export class ValidationManager {
           DeadCnt,
           HeadShotCnt,
           ISNULL(Assist, 0) as Assist,
+          ISNULL(Exp, 0) as Exp,
+          ISNULL(Money, 0) as Money,
+          ISNULL(Forfeited, 0) as Forfeited,
           LogDate
         FROM COMBATARMS_LOG.dbo.BST_Fullmatchlog
         WHERE GameMode = 5
@@ -265,6 +301,89 @@ export class ValidationManager {
     }
   }
 
+  private getPenaltyMap(matchId: string): Map<number, PlayerPenaltyInfo> {
+    if (!this.playerPenalties.has(matchId)) {
+      this.playerPenalties.set(matchId, new Map())
+    }
+    return this.playerPenalties.get(matchId)!
+  }
+
+  private getMatchLogCache(matchId: string): Map<number, MatchLog> {
+    if (!this.matchLogsCache.has(matchId)) {
+      this.matchLogsCache.set(matchId, new Map())
+    }
+    return this.matchLogsCache.get(matchId)!
+  }
+
+  private detectPenaltyReason(log: MatchLog): PlayerPenaltyReason | null {
+    const forfeited = log.Forfeited === 1
+    const expZero = (log.Exp ?? 0) === 0
+    const moneyZero = (log.Money ?? 0) === 0
+
+    if (forfeited) {
+      return 'FORFEIT'
+    }
+
+    if (expZero && moneyZero) {
+      return 'ZERO_REWARD'
+    }
+
+    return null
+  }
+
+  private markPlayerPenalty(
+    matchId: string,
+    oidUser: number,
+    reason: PlayerPenaltyReason,
+    log?: MatchLog,
+    evidence?: PlayerPenaltyInfo['evidence']
+  ): void {
+    const penalties = this.getPenaltyMap(matchId)
+    if (penalties.has(oidUser)) {
+      return
+    }
+
+    const info: PlayerPenaltyInfo = {
+      reason,
+      detectedAt: new Date(),
+      lastLogDate: log?.LogDate,
+      evidence: evidence ?? (reason === 'NO_LOG' ? 'NO_LOG' : undefined)
+    }
+
+    penalties.set(oidUser, info)
+    const evidenceLabel = evidence || info.evidence || 'unknown'
+    console.log('warn', `�Y\"% Penalidade registrada para ${oidUser} no match ${matchId} (motivo: ${reason}, evid�ncia: ${evidenceLabel})`)
+
+    this.persistPenaltySnapshot(matchId).catch(error => {
+      console.log('warn', `�?O N��o foi poss��vel salvar penalidades no Redis para match ${matchId}`, error)
+    })
+  }
+
+  private async persistPenaltySnapshot(matchId: string): Promise<void> {
+    if (!this.redisAvailable) return
+    const penalties = this.playerPenalties.get(matchId)
+    if (!penalties || penalties.size === 0) {
+      await this.redisDel(`match:${matchId}:penalties`)
+      return
+    }
+
+    const payload = Array.from(penalties.entries()).map(([oidUser, info]) => ({
+      oidUser,
+      reason: info.reason,
+      detectedAt: info.detectedAt.toISOString(),
+      lastLogDate: info.lastLogDate ? info.lastLogDate.toISOString() : undefined,
+      evidence: info.evidence
+    }))
+
+    await this.redisSet(`match:${matchId}:penalties`, JSON.stringify(payload), { EX: 7200 })
+  }
+
+  private async clearMatchCaches(matchId: string): Promise<void> {
+    this.playerPenalties.delete(matchId)
+    this.matchLogsCache.delete(matchId)
+    await this.redisDel(`match:${matchId}:penalties`)
+  }
+
   /**
    * Processa um match individual
    */
@@ -275,22 +394,54 @@ export class ValidationManager {
   ): Promise<void> {
     const { matchId, mapNumber, startedAt, expectedPlayers } = validation
 
-    const matchLogs = allLogs.filter(log =>
+    const recentLogs = allLogs.filter(log =>
       log.MapNo === mapNumber &&
       log.LogDate >= startedAt &&
       expectedPlayers.includes(log.oidUser)
     )
+    const penalties = this.getPenaltyMap(matchId)
+    const logCache = this.getMatchLogCache(matchId)
 
-    log('debug', `🎮 Match ${matchId}: ${matchLogs.length} logs encontrados`)
+    for (const logEntry of recentLogs) {
+      logCache.set(logEntry.oidUser, logEntry)
+      const reason = this.detectPenaltyReason(logEntry)
+      if (reason) {
+        const evidence: PlayerPenaltyInfo['evidence'] = reason === 'FORFEIT' ? 'FORFEITED' : 'ZERO_REWARD'
+        this.markPlayerPenalty(matchId, logEntry.oidUser, reason, logEntry, evidence)
+      }
+    }
+
+    const aggregatedLogs = Array.from(logCache.values())
+    const uniqueLogPlayers = new Set(aggregatedLogs.map(log => log.oidUser))
+    const penaltyPlayers = new Set(penalties.keys())
+    const accountedPlayers = new Set([...uniqueLogPlayers, ...penaltyPlayers])
+
+    log('debug', `🎮 Match ${matchId}: ${aggregatedLogs.length} logs acumulados (${recentLogs.length} novos), ${penaltyPlayers.size} penalizado(s)`)
 
     // Ajusta o mínimo de logs necessários se for 1v1 (modo de teste)
     const minLogs = expectedPlayers.length >= 6 
       ? this.MIN_LOGS_REQUIRED 
       : expectedPlayers.length;
 
-    if (matchLogs.length >= minLogs && matchLogs.length >= expectedPlayers.length) {
-      await this.handleMatchCompleted(matchId, matchLogs, expectedPlayers)
+    const hasEnoughLogs = aggregatedLogs.length >= minLogs
+    if (hasEnoughLogs && accountedPlayers.size >= expectedPlayers.length) {
+      await this.handleMatchCompleted(matchId, aggregatedLogs, expectedPlayers, penalties)
       return
+    }
+
+    if (hasEnoughLogs && accountedPlayers.size < expectedPlayers.length) {
+      const missingPlayers = expectedPlayers.filter(oid => !accountedPlayers.has(oid))
+      if (missingPlayers.length > 0) {
+        for (const missing of missingPlayers) {
+          this.markPlayerPenalty(matchId, missing, 'NO_LOG', undefined, 'NO_LOG')
+        }
+        const updatedPenalties = this.getPenaltyMap(matchId)
+        const updatedAccounted = new Set([...uniqueLogPlayers, ...updatedPenalties.keys()])
+        if (updatedAccounted.size >= expectedPlayers.length) {
+          await this.handleMatchCompleted(matchId, aggregatedLogs, expectedPlayers, updatedPenalties)
+          return
+        }
+      }
     }
 
     validation.attempts++
@@ -317,7 +468,8 @@ export class ValidationManager {
   private async handleMatchCompleted(
     matchId: string,
     logs: MatchLog[],
-    expectedPlayers: number[]
+    expectedPlayers: number[],
+    penalties?: Map<number, PlayerPenaltyInfo>
   ): Promise<void> {
     log('info', `🎉 Match ${matchId} completado! Validando...`)
     
@@ -339,9 +491,12 @@ export class ValidationManager {
 
     try {
       const playersWhoPlayed = [...new Set(logs.map(log => log.oidUser))]
-      const abandonments = expectedPlayers.filter(oid => !playersWhoPlayed.includes(oid))
+      const penalizedPlayers = penalties ? Array.from(penalties.keys()) : []
+      const fallbackAbandonments = expectedPlayers.filter(oid => !playersWhoPlayed.includes(oid))
+      const abandonmentSet = new Set<number>([...penalizedPlayers, ...fallbackAbandonments])
+      const abandonments = Array.from(abandonmentSet)
 
-      log('info', `📊 Match ${matchId}: ${playersWhoPlayed.length}/${expectedPlayers.length} jogaram, ${abandonments.length} abandonos`)
+      log('info', `📊 Match ${matchId}: ${playersWhoPlayed.length}/${expectedPlayers.length} jogaram, ${abandonments.length} penalizações`)
       if (abandonments.length > 0) {
         log('warn', `Jogadores ausentes punidos: ${abandonments.join(', ')}`)
       }
@@ -352,7 +507,7 @@ export class ValidationManager {
         log('info', `✅ Match ${matchId} VÁLIDO - Vencedor: ${validationResult.winner}`)
         
         // Passa `lobbyData` para a função que atualiza os resultados
-        await this.updateMatchResults(matchId, validationResult, logs, lobbyData)
+        await this.updateMatchResults(matchId, validationResult, logs, lobbyData, penalties)
 
         if (this.callbacks.onMatchCompleted) {
           await this.callbacks.onMatchCompleted(matchId, validationResult)
@@ -382,6 +537,7 @@ export class ValidationManager {
     } catch (error) {
       log('error', `❌ Erro ao processar match ${matchId}`, error)
     } finally {
+      await this.clearMatchCaches(matchId)
       // Remove da validação ativa em qualquer caso (sucesso ou falha)
       this.activeMatches.delete(matchId)
       await this.redisDel(`validation:${matchId}`)
@@ -474,200 +630,217 @@ export class ValidationManager {
   /**
    * Atualiza resultados do match no banco (ARQUITETURA IDEAL)
    */
+
+
   private async updateMatchResults(
     matchId: string,
     result: ValidationResult,
     logs: MatchLog[],
-    lobbyData: any // Dados do lobby:temp:${matchId}
+    lobbyData: any,
+    penalties: Map<number, PlayerPenaltyInfo> | undefined
   ): Promise<void> {
     const { winner } = result
+    if (!winner) {
+      log('warn', `Match ${matchId} sem vencedor definido, pontuacao ignorada`)
+      return
+    }
+
     const scoreAlpha = winner === 'ALPHA' ? 1 : 0
     const scoreBravo = winner === 'BRAVO' ? 1 : 0
 
-    // 1. ATUALIZA o BST_RankedMatch (que já existe)
     try {
       await prismaRanked.$executeRaw`
         UPDATE BST_RankedMatch
         SET
-          status = 'awaiting-confirmation', -- ou 'completed' se pularmos a confirmação
+          status = 'completed',
+          endReason = 'SUCCESS',
           endedAt = GETDATE(),
           duration = DATEDIFF(SECOND, startedAt, GETDATE()),
           scoreAlpha = ${scoreAlpha},
           scoreBravo = ${scoreBravo},
           winnerTeam = ${winner}
         WHERE
-          id = ${matchId} AND status = 'in-progress'
+          id = ${matchId}
+          AND status IN ('awaiting-ready', 'in-progress', 'awaiting-confirmation')
       `
     } catch (e) {
-      log('error', `Falha ao ATUALIZAR BST_RankedMatch ${matchId}`, e);
-      return; // Para se não conseguir atualizar o match
+      log('error', `Falha ao ATUALIZAR BST_RankedMatch ${matchId}`, e)
+      return
     }
 
-    // 2. Monta dados dos jogadores para cálculo de MMR
     const playerTeams = lobbyData.teams
     const allPlayers = [...playerTeams.ALPHA, ...playerTeams.BRAVO]
-    
-    // Busca MMR atual (fallback para MMR do lobbyData)
-    const playersMMR: { oidUser: number, currentMMR: number, matchesPlayed: number, placementCompleted: boolean }[] = [];
-    try {
-      const playerOids = allPlayers.map((p: any) => p.oidUser);
-      const mmrResults = await prismaRanked.$queryRaw<any[]>`
-        SELECT oidUser, 
-               ISNULL(eloRating, 1000) as currentMMR,
-               ISNULL(matchesPlayed, 0) as matchesPlayed,
-               ISNULL(placementCompleted, 1) as placementCompleted
-        FROM BST_RankedUserStats
-        WHERE oidUser IN (${Prisma.join(playerOids)})
-      `
-      const mmrMap = new Map(mmrResults.map(r => [r.oidUser, r]));
-      for (const player of allPlayers) {
-        const stats = mmrMap.get(player.oidUser);
-        playersMMR.push({
-          oidUser: player.oidUser,
-          currentMMR: stats?.currentMMR || player.mmr || 1000,
-          matchesPlayed: stats?.matchesPlayed || 0,
-          placementCompleted: stats?.placementCompleted === 1
-        });
-      }
-    } catch (e) {
-      log('error', 'Erro ao buscar MMRs, usando fallback do lobbyData', e);
-      for (const player of allPlayers) {
-        playersMMR.push({
-          oidUser: player.oidUser,
-          currentMMR: player.mmr || 1000,
-          matchesPlayed: 0,
-          placementCompleted: true
-        });
-      }
+    const playerTeamMap = new Map<number, 'ALPHA' | 'BRAVO'>()
+    playerTeams.ALPHA.forEach((p: any) => playerTeamMap.set(p.oidUser, 'ALPHA'))
+    playerTeams.BRAVO.forEach((p: any) => playerTeamMap.set(p.oidUser, 'BRAVO'))
+    const penaltyMap = penalties ?? new Map()
+
+    const playerOids = allPlayers.map((p: any) => p.oidUser)
+    const rankStatesRaw = await prismaRanked.$queryRaw<any[]>`
+      SELECT 
+        oidUser,
+        ISNULL(rankTier, 'BRONZE_3') as rankTier,
+        ISNULL(rankPoints, 0) as rankPoints,
+        ISNULL(winStreak, 0) as winStreak,
+        ISNULL(lossProtection, 0) as lossProtection,
+        ISNULL(lossesAtZero, 0) as lossesAtZero,
+        ISNULL(md5Wins, 0) as md5Wins,
+        ISNULL(md5Losses, 0) as md5Losses,
+        ISNULL(md5Active, 0) as md5Active
+      FROM BST_RankedUserStats
+      WHERE oidUser IN (${Prisma.join(playerOids)})
+    `
+    const rankStateByOid = new Map<number, PlayerRankState>()
+    for (const raw of rankStatesRaw) {
+      rankStateByOid.set(raw.oidUser, {
+        rankTier: raw.rankTier,
+        rankPoints: Number(raw.rankPoints ?? 0),
+        winStreak: Number(raw.winStreak ?? 0),
+        lossProtection: Number(raw.lossProtection ?? 0),
+        lossesAtZero: Number(raw.lossesAtZero ?? 0),
+        md5Wins: Number(raw.md5Wins ?? 0),
+        md5Losses: Number(raw.md5Losses ?? 0),
+        md5Active: raw.md5Active ? true : false
+      })
     }
 
-    // Monta dados completos para o MatchValidator
-
-    // LOG EXTRA: Checagem de consistência entre time vencedor e isWin dos logs
-    for (const player of allPlayers) {
-      const team = playerTeams.ALPHA.find((p: any) => p.oidUser === player.oidUser) ? 'ALPHA' : 'BRAVO';
-      const playerLog = logs.find(l => l.oidUser === player.oidUser);
-      if (playerLog) {
-        if ((team === winner && !playerLog.isWin) || (team !== winner && playerLog.isWin)) {
-          log('warn', `🔎 INCONSISTÊNCIA: Jogador ${player.username} (oidUser=${player.oidUser}) está no time ${team}, winner=${winner}, mas isWin=${playerLog.isWin}`);
-        } else {
-          log('debug', `OK: ${player.username} (oidUser=${player.oidUser}) team=${team} winner=${winner} isWin=${playerLog.isWin}`);
-        }
-      } else {
-        log('warn', `⚠️ Sem log para jogador ${player.username} (oidUser=${player.oidUser})`);
+    const rankInputs: RankCalculationPlayerInput[] = allPlayers.map((player: any) => {
+      const team = playerTeamMap.get(player.oidUser) || 'ALPHA'
+      const playerLog = logs.find(l => l.oidUser === player.oidUser)
+      const state = rankStateByOid.get(player.oidUser) || {
+        rankTier: DEFAULT_TIER,
+        rankPoints: 0,
+        winStreak: 0,
+        lossProtection: 0,
+        lossesAtZero: 0,
+        md5Wins: 0,
+        md5Losses: 0,
+        md5Active: false
       }
-    }
-
-    const playersData: PlayerMatchData[] = allPlayers.map((player: any) => {
-      const team = playerTeams.ALPHA.find((p: any) => p.oidUser === player.oidUser) ? 'ALPHA' : 'BRAVO';
-      const playerLog = logs.find(l => l.oidUser === player.oidUser);
-      const didAbandon = result.abandonments.includes(player.oidUser);
-      const mmrData = playersMMR.find(m => m.oidUser === player.oidUser);
+      const penaltyInfo = penaltyMap.get(player.oidUser)
+      const penalty = mapPenaltyToImpact(penaltyInfo)
       return {
         oidUser: player.oidUser,
         username: player.username,
         team,
-        currentMMR: mmrData?.currentMMR || 1000,
-        matchesPlayed: mmrData?.matchesPlayed || 0,
-        placementCompleted: mmrData?.placementCompleted ?? false,
-        kills: playerLog?.KillCnt || 0,
-        deaths: playerLog?.DeadCnt || 0,
-        assists: playerLog?.Assist || 0,
-        headshots: playerLog?.HeadShotCnt || 0,
-        didWin: playerLog ? playerLog.isWin : false,
-        didAbandon
-      };
-    });
+        didWin: winner === team,
+        state,
+        stats: {
+          kills: playerLog?.KillCnt || 0,
+          deaths: playerLog?.DeadCnt || 0,
+          assists: playerLog?.Assist || 0,
+          headshots: playerLog?.HeadShotCnt || 0,
+          bombPlants: playerLog?.BombsPlanted || 0,
+          bombDefuses: playerLog?.BombsDefused || 0
+        },
+        penalty
+      }
+    })
 
-    if (!winner) {
-      log('warn', `⚠️ Match ${matchId} sem vencedor definido, MMR não será calculado`)
-      return
+    const teamStrength = { ALPHA: 0, BRAVO: 0 }
+    const teamCounts = { ALPHA: 0, BRAVO: 0 }
+    for (const input of rankInputs) {
+      teamStrength[input.team] += computeMatchmakingValue(input.state.rankTier, input.state.rankPoints)
+      teamCounts[input.team] += 1
     }
+    if (teamCounts.ALPHA > 0) teamStrength.ALPHA /= teamCounts.ALPHA
+    if (teamCounts.BRAVO > 0) teamStrength.BRAVO /= teamCounts.BRAVO
 
-    // 3. Calcula as mudanças de MMR
-    const mmrResults = MatchValidator.calculateMMRChanges(playersData, winner)
-    log('info', `🎯 MMR calculado para ${mmrResults.length} jogadores (Match ${matchId})`)
+    const rankResults = calculateRankChanges(rankInputs, { winner, teamStrength })
+    const resultByOid = new Map(rankResults.map(res => [res.oidUser, res]))
+    log('info', `Pontuacoes recalculadas para ${rankResults.length} jogadores (Match ${matchId})`)
 
-    // 4. INSERE os registros no BST_MatchPlayer (agora com todos os dados)
-    for (const mmrResult of mmrResults) {
-      const pData = playersData.find(p => p.oidUser === mmrResult.oidUser);
-      if (!pData) continue;
-      const seedingBonus = mmrResult.breakdown?.placementSeedingBonus || 0;
-      
+    for (const input of rankInputs) {
+      const result = resultByOid.get(input.oidUser)
+      if (!result) continue
       try {
         await prismaRanked.$executeRaw`
           INSERT INTO BST_MatchPlayer 
-            (matchId, oidUser, team, kills, deaths, assists, headshots, mmrChange, placementSeedingBonus, confirmedResult, confirmedAt)
+            (matchId, oidUser, team, kills, deaths, assists, headshots, mmrChange, confirmedResult, confirmedAt)
           VALUES 
-            (${matchId}, ${pData.oidUser}, ${pData.team}, 
-             ${pData.kills}, ${pData.deaths}, ${pData.assists}, ${pData.headshots}, 
-             ${mmrResult.change}, ${seedingBonus}, 1, GETDATE())
+            (${matchId}, ${input.oidUser}, ${input.team}, 
+             ${input.stats.kills}, ${input.stats.deaths}, ${input.stats.assists}, ${input.stats.headshots}, 
+             ${result.matchmakingDelta}, 1, GETDATE())
         `
       } catch (e) {
-        log('error', `Falha ao INSERIR BST_MatchPlayer para ${pData.oidUser} no match ${matchId}`, e);
+        log('error', `Falha ao INSERIR BST_MatchPlayer para ${input.oidUser} no match ${matchId}`, e)
       }
     }
 
-    // 5. ATUALIZA (MERGE) o BST_RankedUserStats
-    for (const mmrResult of mmrResults) {
-      const playerSnapshot = playersData.find(p => p.oidUser === mmrResult.oidUser)
-      const didWin = playerSnapshot?.didWin || false
-      const seedingBonus = mmrResult.breakdown?.placementSeedingBonus || 0
-      const matchesBefore = playerSnapshot?.matchesPlayed || 0
-      const matchesAfter = matchesBefore + 1
-      const completedPlacement = seedingBonus > 0 || matchesAfter >= MatchValidator.CONFIG.PLACEMENT_MATCHES
-      
+    for (const input of rankInputs) {
+      const result = resultByOid.get(input.oidUser)
+      if (!result) continue
+      const newState = result.newState
+      const newMatchmaking = computeMatchmakingValue(newState.rankTier, newState.rankPoints)
+      const didWin = winner === input.team
       try {
         await prismaRanked.$executeRaw`
           MERGE INTO BST_RankedUserStats AS target
-          USING (SELECT ${mmrResult.oidUser} AS oidUser) AS source
+          USING (SELECT ${input.oidUser} AS oidUser) AS source
           ON target.oidUser = source.oidUser
           WHEN MATCHED THEN
             UPDATE SET 
-              eloRating = ${mmrResult.newMMR},
+              eloRating = ${newMatchmaking},
+              rankTier = ${newState.rankTier},
+              rankPoints = ${newState.rankPoints},
+              winStreak = ${newState.winStreak},
+              lossProtection = ${newState.lossProtection},
+              lossesAtZero = ${newState.lossesAtZero},
+              md5Wins = ${newState.md5Wins},
+              md5Losses = ${newState.md5Losses},
+              md5Active = ${newState.md5Active ? 1 : 0},
               matchesPlayed = matchesPlayed + 1,
               matchesWon = matchesWon + ${didWin ? 1 : 0},
               lastMatchAt = GETDATE(),
-              updatedAt = GETDATE(),
-              placementCompleted = CASE 
-                WHEN placementCompleted = 1 THEN 1 
-                ELSE ${completedPlacement ? 1 : 0}
-              END
+              updatedAt = GETDATE()
           WHEN NOT MATCHED THEN
-            INSERT (oidUser, eloRating, matchesPlayed, matchesWon, lastMatchAt, placementCompleted)
-            VALUES (${mmrResult.oidUser}, ${mmrResult.newMMR}, 1, ${didWin ? 1 : 0}, GETDATE(), ${completedPlacement ? 1 : 0});
+            INSERT (oidUser, eloRating, rankTier, rankPoints, winStreak, lossProtection, lossesAtZero, md5Wins, md5Losses, md5Active, matchesPlayed, matchesWon, lastMatchAt, createdAt, updatedAt)
+            VALUES (${input.oidUser}, ${newMatchmaking}, ${newState.rankTier}, ${newState.rankPoints}, ${newState.winStreak}, ${newState.lossProtection}, ${newState.lossesAtZero}, ${newState.md5Wins}, ${newState.md5Losses}, ${newState.md5Active ? 1 : 0}, 1, ${didWin ? 1 : 0}, GETDATE(), GETDATE(), GETDATE());
         `
-        log('debug', `💾 ${mmrResult.username}: ${mmrResult.oldMMR} → ${mmrResult.newMMR} (${mmrResult.change >= 0 ? '+' : ''}${mmrResult.change})`)
+        await this.updatePlayerBackground(input.oidUser, newState.rankTier)
       } catch (e) {
-        log('error', `Falha ao ATUALIZAR BST_RankedUserStats para ${mmrResult.oidUser}`, e);
+        log('error', `Falha ao ATUALIZAR BST_RankedUserStats para ${input.oidUser}`, e)
       }
     }
 
-    // 6. Limpa TODAS as chaves temporárias do Redis
-    log('debug', `🧹 Limpando chaves Redis para match ${matchId} concluído...`)
-      
-      // Chaves do QueueManager
-      await this.redis.del(`lobby:temp:${matchId}`)
-      await this.redis.del(`match:${matchId}:queueSnapshot`)
-      await this.redis.del(`match:${matchId}:classes`)
+    log('debug', `Limpando chaves Redis para match ${matchId} concluido...`)
+    await this.redis.del(`lobby:temp:${matchId}`)
+    await this.redis.del(`match:${matchId}:queueSnapshot`)
+    await this.redis.del(`match:${matchId}:classes`)
+    await this.redis.del(`match:${matchId}:room`)
+    await this.redis.del(`match:${matchId}:status`)
+    await this.redis.del(`match:${matchId}:host`)
+    await this.redis.del(`match:${matchId}:hostPassword`)
+    await this.redis.del(`room:${matchId}`)
+    await this.redis.del(`match:${matchId}:ready`)
+    await this.redis.del(`lobby:${matchId}:state`)
+    await this.redis.del(`lobby:${matchId}:vetos`)
 
-      // Chaves do HostManager
-      await this.redis.del(`match:${matchId}:room`)
-      await this.redis.del(`match:${matchId}:status`)
-      await this.redis.del(`match:${matchId}:host`)
-      await this.redis.del(`match:${matchId}:hostPassword`)
-      await this.redis.del(`room:${matchId}`) // (Chave que você viu)
-
-      // Chave do ReadyManager
-      await this.redis.del(`match:${matchId}:ready`)
-
-      // Chave do LobbyManager
-      await this.redis.del(`lobby:${matchId}:state`)
-      await this.redis.del(`lobby:${matchId}:vetos`)
-
-    log('info', `💾 Match ${matchId} resultados + MMR salvos: ${winner} venceu`)
+    log('info', `Match ${matchId} resultados salvos: ${winner} venceu`)
   }
 
+  private async updatePlayerBackground(oidUser: number, tier: RankTier): Promise<void> {
+    const backgroundId = getBackgroundIdForTier(tier)
+    if (!backgroundId) return
+
+    try {
+      await prismaGame.$executeRaw`
+        MERGE COMBATARMS.dbo.CBT_User_NickName_Background AS target
+        USING (SELECT ${oidUser} AS oidUser) AS source
+        ON target.oidUser = source.oidUser
+        WHEN MATCHED THEN
+          UPDATE SET
+            Background = ${backgroundId},
+            Emblem = 0,
+            EndDate = '2500-12-31 23:59:59'
+        WHEN NOT MATCHED THEN
+          INSERT (oidUser, Background, Emblem, EndDate)
+          VALUES (${oidUser}, ${backgroundId}, 0, '2500-12-31 23:59:59');
+      `
+    } catch (error) {
+      log('warn', `Falha ao aplicar brasão de elo para ${oidUser} (${tier})`, error)
+    }
+  }
   /**
    * Trata timeout de validação (50 minutos sem logs)
    */
@@ -696,6 +869,7 @@ export class ValidationManager {
     } catch (error) {
       log('error', `❌ Erro ao processar timeout do match ${matchId}`, error)
     } finally {
+      await this.clearMatchCaches(matchId)
       // Remove da validação ativa
       this.activeMatches.delete(matchId)
       await this.redisDel(`validation:${matchId}`)
@@ -757,6 +931,8 @@ export class ValidationManager {
     log('info', '🛑 Encerrando ValidationManager...')
     this.stopAllPolling()
     this.activeMatches.clear()
+    this.playerPenalties.clear()
+    this.matchLogsCache.clear()
     log('info', '✅ ValidationManager encerrado')
   }
 

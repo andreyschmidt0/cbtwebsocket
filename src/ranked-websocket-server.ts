@@ -12,6 +12,7 @@ import { prismaRanked, prismaGame } from './database/prisma';
 import { log } from './utils/logger';
 import { getRedisClient } from './database/redis-client';
 import crypto from 'crypto';
+import { computeMatchmakingValue, formatTierLabel, RankTier } from './rank/rank-tiers';
 
 // ... (Interfaces: AuthenticatedWebSocket, WSMessage, etc. - Sem mudanças) ...
 interface AuthenticatedWebSocket extends WebSocket {
@@ -115,7 +116,9 @@ export class RankedWebSocketServer {
             ISNULL(mp.assists, 0) as assists,
             ISNULL(mp.headshots, 0) as headshots,
             ISNULL(mp.mmrChange, 0) as mmrChange,
-            ISNULL(rs.eloRating, 1000) as currentMMR,
+            ISNULL(rs.rankTier, 'BRONZE_3') as rankTier,
+            ISNULL(rs.rankPoints, 0) as rankPoints,
+            ISNULL(rs.eloRating, 0) as matchmakingRating,
             u.NickName as username
           FROM BST_MatchPlayer mp
           LEFT JOIN BST_RankedUserStats rs ON rs.oidUser = mp.oidUser
@@ -138,8 +141,13 @@ export class RankedWebSocketServer {
           const assists = Number(player.assists) || 0;
           const headshots = Number(player.headshots) || 0;
           const mmrChange = Number(player.mmrChange) || 0;
-          const newMMR = Number(player.currentMMR) || 0;
-          const oldMMR = newMMR - mmrChange;
+          const storedTier = (player.rankTier as RankTier) || 'BRONZE_3';
+          const storedPoints = Number(player.rankPoints ?? 0);
+          const storedMatchValue = Number(player.matchmakingRating ?? 0);
+          const currentMatchValue = storedMatchValue > 0
+            ? storedMatchValue
+            : computeMatchmakingValue(storedTier, storedPoints);
+          const oldMatchValue = currentMatchValue - mmrChange;
           const kdRatio = deaths > 0 ? parseFloat((kills / deaths).toFixed(2)) : kills;
           const didWin = result.winner ? player.team === result.winner : null;
 
@@ -156,9 +164,14 @@ export class RankedWebSocketServer {
             result: didWin === null ? 'PENDING' : (didWin ? 'WIN' : 'LOSS'),
             abandoned: abandonmentSet.has(player.oidUser),
             mmr: {
-              old: oldMMR,
-              new: newMMR,
+              old: oldMatchValue,
+              new: currentMatchValue,
               change: mmrChange
+            },
+            rank: {
+              tier: storedTier,
+              tierLabel: formatTierLabel(storedTier),
+              points: storedPoints
             },
             stats: {
               kills,
@@ -506,17 +519,6 @@ this.readyManager.onReadyFailed(async (
   this.lobbyManager.onMapSelected(async (matchId, mapId) => {
       log('debug', `🗺️ Mapa ${mapId} selecionado para match ${matchId}, iniciando HOST selection...`)
 
-      // Atualiza o BST_RankedMatch com o nome (string) do mapa selecionado
-      try {
-        await prismaRanked.$executeRaw`
-          UPDATE BST_RankedMatch
-          SET map = ${mapId}
-          WHERE id = ${matchId} AND status = 'ready'
-        `
-      } catch (err) {
-        log('error', `Falha ao salvar o mapa ${mapId} no BST_RankedMatch ${matchId}`, err);
-      }
-
       const lobby = this.lobbyManager.getLobby(matchId)
       if (!lobby) return
 
@@ -564,7 +566,7 @@ this.readyManager.onReadyFailed(async (
       }
 
       // Inicia HOST selection com o mapNumber correto
-      await this.hostManager.startHostSelection(matchId, hostPlayers as any, mapNumber);
+      await this.hostManager.startHostSelection(matchId, hostPlayers as any, mapNumber, mapId);
     })
 
     // Callback quando houver atualização de veto
@@ -967,25 +969,42 @@ this.readyManager.onReadyFailed(async (
         log('warn', `Falha ao recuperar dados de requeue para ${ws.oidUser}`, err)
       }
 
-      let playerMMR = 1000
+      let playerRankTier: RankTier = 'BRONZE_3'
+      let playerRankPoints = 0
+      let playerMMR = 0
       try {
-        const [mmrRow] = await prismaRanked.$queryRaw<{ eloRating: number | null }[]>`
-          SELECT ISNULL(eloRating, 1000) as eloRating
+        const [mmrRow] = await prismaRanked.$queryRaw<{ rankTier: string | null; rankPoints: number | null; eloRating: number | null }[]>`
+          SELECT 
+            ISNULL(rankTier, 'BRONZE_3') as rankTier,
+            ISNULL(rankPoints, 0) as rankPoints,
+            ISNULL(eloRating, 0) as eloRating
           FROM BST_RankedUserStats
           WHERE oidUser = ${ws.oidUser}
         `
-        const mmrValue = Number(mmrRow?.eloRating)
-        if (!Number.isNaN(mmrValue)) {
-          playerMMR = mmrValue
+        if (mmrRow) {
+          playerRankTier = (mmrRow.rankTier as RankTier) || 'BRONZE_3'
+          playerRankPoints = Number(mmrRow.rankPoints ?? 0)
+          const storedRating = Number(mmrRow.eloRating ?? 0)
+          playerMMR = storedRating > 0
+            ? storedRating
+            : computeMatchmakingValue(playerRankTier, playerRankPoints)
+        } else {
+          playerMMR = computeMatchmakingValue(playerRankTier, playerRankPoints)
         }
       } catch (mmrError) {
-        log('warn', `Falha ao buscar MMR para ${ws.oidUser}, usando default 1000`, mmrError)
+        log('warn', `Falha ao buscar rank para ${ws.oidUser}, usando valores padr��o`, mmrError)
+        playerMMR = computeMatchmakingValue(playerRankTier, playerRankPoints)
+      }
+      if (!playerMMR) {
+        playerMMR = computeMatchmakingValue(playerRankTier, playerRankPoints)
       }
 
       const playerData: QueuePlayer = {
         oidUser: ws.oidUser,
         username: ws.username || `Player${ws.oidUser}`,
         mmr: playerMMR,
+        rankTier: playerRankTier,
+        rankPoints: playerRankPoints,
         discordId: ws.discordId, // Passa discordId para validação anti-multi-accounting
         classes: classesOverride || { primary: 'T3', secondary: 'SMG' },
         queuedAt: queuedAtOverride,
@@ -1308,6 +1327,7 @@ this.readyManager.onReadyFailed(async (
         mapVotes: this.lobbyManager.getMapVotes(matchId),
         playerTeam,
         chatMessages: playerTeam ? lobby.chatMessages[playerTeam] : [],
+        generalChatMessages: playerTeam ? this.buildGeneralChatHistory(lobby, playerTeam) : [],
         status: lobby.status,
         classesByPlayer: filteredClassesByPlayer, // <-- CORRIGIDO
         mapPool: mapPool // <-- ADICIONE ESTA LINHA
@@ -1408,13 +1428,14 @@ this.readyManager.onReadyFailed(async (
     // ... (Todo o seu método handleChatSend - sem mudanças) ...
     if (!ws.oidUser || !ws.username) return
 
-    const { matchId, message } = payload
+    const { matchId, message, channel } = payload
+    const normalizedChannel: 'TEAM' | 'GENERAL' = channel === 'GENERAL' ? 'GENERAL' : 'TEAM'
 
     if (!message || message.trim().length === 0) {
       return
     }
 
-    const chatResult = await this.lobbyManager.addChatMessage(matchId, ws.oidUser, message.trim())
+    const chatResult = await this.lobbyManager.addChatMessage(matchId, ws.oidUser, message.trim(), normalizedChannel)
     if (!chatResult) {
       this.sendError(ws, 'Erro ao enviar mensagem')
       return
@@ -1423,21 +1444,43 @@ this.readyManager.onReadyFailed(async (
     const lobby = this.lobbyManager.getLobby(matchId)
     if (!lobby) return
 
-    const targetPlayers =
-      chatResult.team === 'ALPHA' ? lobby.teams.ALPHA : lobby.teams.BRAVO
-    const playerIds = targetPlayers.map(p => p.oidUser)
+    if (normalizedChannel === 'TEAM') {
+      const targetPlayers =
+        chatResult.team === 'ALPHA' ? lobby.teams.ALPHA : lobby.teams.BRAVO
+      const playerIds = targetPlayers.map(p => p.oidUser)
 
-    // Broadcast mensagem para todos na lobby
-    this.sendToPlayers(playerIds, {
-      type: 'CHAT_MESSAGE',
-      payload: {
-        team: chatResult.team,
-        oidUser: chatResult.chatMessage.oidUser,
-        username: chatResult.chatMessage.username,
-        message: chatResult.chatMessage.message,
-        timestamp: chatResult.chatMessage.timestamp
-      }
-    })
+      this.sendToPlayers(playerIds, {
+        type: 'CHAT_MESSAGE',
+        payload: {
+          channel: 'TEAM',
+          team: chatResult.team,
+          oidUser: chatResult.chatMessage.oidUser,
+          username: chatResult.chatMessage.username,
+          message: chatResult.chatMessage.message,
+          timestamp: chatResult.chatMessage.timestamp
+        }
+      })
+      return
+    }
+
+    // Canal geral: envia para todos com anonimiza��o de acordo com o time de quem recebe
+    const allPlayers = [...lobby.teams.ALPHA, ...lobby.teams.BRAVO]
+    for (const player of allPlayers) {
+      const viewerTeam = lobby.teams.ALPHA.some(p => p.oidUser === player.oidUser) ? 'ALPHA' : 'BRAVO'
+      const displayName = this.getChatDisplayName(lobby, viewerTeam, chatResult.team, chatResult.chatMessage)
+
+      this.sendToPlayer(player.oidUser, {
+        type: 'CHAT_MESSAGE',
+        payload: {
+          channel: 'GENERAL',
+          team: chatResult.team,
+          oidUser: chatResult.chatMessage.oidUser,
+          username: displayName,
+          message: chatResult.chatMessage.message,
+          timestamp: chatResult.chatMessage.timestamp
+        }
+      })
+    }
   }
 
   /**
@@ -1644,6 +1687,32 @@ private async validateAuthToken(params: TokenValidationParams): Promise<TokenVal
         this.sendMessage(client, message)
       }
     })
+  }
+
+  private getChatDisplayName(
+    lobby: any,
+    viewerTeam: 'ALPHA' | 'BRAVO',
+    senderTeam: 'ALPHA' | 'BRAVO',
+    chatMessage: { oidUser: number; username: string }
+  ): string {
+    if (viewerTeam === senderTeam) {
+      return chatMessage.username
+    }
+    const opponents = viewerTeam === 'ALPHA' ? lobby.teams.BRAVO : lobby.teams.ALPHA
+    const index = opponents.findIndex((p: any) => p.oidUser === chatMessage.oidUser)
+    const number = index >= 0 ? index + 1 : opponents.length + 1
+    return `Player ${String(number).padStart(2, '0')}`
+  }
+
+  private buildGeneralChatHistory(lobby: any, viewerTeam: 'ALPHA' | 'BRAVO') {
+    return lobby.generalChatMessages.map((msg: any) => ({
+      channel: 'GENERAL',
+      team: msg.team,
+      oidUser: msg.oidUser,
+      username: this.getChatDisplayName(lobby, viewerTeam, msg.team, msg),
+      message: msg.message,
+      timestamp: msg.timestamp
+    }))
   }
 
   /**

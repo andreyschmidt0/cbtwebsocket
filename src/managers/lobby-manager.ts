@@ -13,11 +13,15 @@ interface Team {
   BRAVO: Player[]
 }
 
+type ChatChannel = 'TEAM' | 'GENERAL'
+
 interface ChatMessage {
   oidUser: number
   username: string
   message: string
   timestamp: number
+  team: 'ALPHA' | 'BRAVO'
+  channel: ChatChannel
 }
 
 interface VetoHistoryItem {
@@ -39,6 +43,7 @@ interface LobbyState {
   timeRemaining: number // Tempo restante em segundos para o veto atual
   selectedMap: string | null
   chatMessages: Record<'ALPHA' | 'BRAVO', ChatMessage[]>
+  generalChatMessages: ChatMessage[]
   status: 'waiting' | 'veto-phase' | 'map-selected' | 'ready'
 }
 
@@ -158,6 +163,7 @@ constructor() {
         ALPHA: [],
         BRAVO: []
       },
+      generalChatMessages: [],
       status: 'veto-phase'
     }
 
@@ -557,8 +563,9 @@ async executeRoleSwap(
   async addChatMessage(
     matchId: string,
     oidUser: number,
-    message: string
-  ): Promise<{ team: 'ALPHA' | 'BRAVO'; chatMessage: ChatMessage } | null> {
+    message: string,
+    channel: ChatChannel = 'TEAM'
+  ): Promise<{ team: 'ALPHA' | 'BRAVO'; channel: ChatChannel; chatMessage: ChatMessage } | null> {
     const lobby = this.lobbies.get(matchId)
     if (!lobby) return null
 
@@ -576,24 +583,33 @@ async executeRoleSwap(
       oidUser,
       username: player?.username || `Player${oidUser}`,
       message,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      team,
+      channel
     }
 
-    lobby.chatMessages[team].push(chatMessage)
+    if (channel === 'GENERAL') {
+      lobby.generalChatMessages.push(chatMessage)
+      if (lobby.generalChatMessages.length > 100) {
+        lobby.generalChatMessages.shift()
+      }
+    } else {
+      lobby.chatMessages[team].push(chatMessage)
 
-    // Limita historico a 50 mensagens por time
-    if (lobby.chatMessages[team].length > 50) {
-      lobby.chatMessages[team].shift()
+      // Limita historico a 50 mensagens por time
+      if (lobby.chatMessages[team].length > 50) {
+        lobby.chatMessages[team].shift()
+      }
     }
 
-    log('info', `[CHAT] ${chatMessage.username} (${matchId}/${team}): ${message}`)
+    log('info', `[CHAT][${channel}] ${chatMessage.username} (${matchId}/${team}): ${message}`)
 
     // Callback
     if (this.onChatMessageCallback) {
       this.onChatMessageCallback(matchId, chatMessage.username, message)
     }
 
-    return { team, chatMessage }
+    return { team, channel, chatMessage }
   }
 
 

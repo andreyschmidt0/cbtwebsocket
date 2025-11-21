@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws';
+import { RankTier } from '../rank/rank-tiers';
 
 export interface ReadyPlayer {
   oidUser: number;
@@ -14,6 +15,8 @@ export interface QueuePlayer {
   oidUser: number;
   username: string;
   mmr: number;
+  rankTier?: RankTier;
+  rankPoints?: number;
   discordId?: string; // Identificador do Discord para prevenir multi-accounting
   classes?: {
     primary: WeaponTier;

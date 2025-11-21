@@ -61,10 +61,7 @@ model BST_MatchPlayer {
   matchId                  String
   oidUser                  Int
   team                     String?                  // "ALPHA" ou "BRAVO"
-  
-  // Ready System
-  readyStatus              String                   @default("PENDING") // PENDING, READY, DECLINED
-  
+
   // Stats da partida (preenchido após logs)
   kills                    Int                      @default(0)
   deaths                   Int                      @default(0)
@@ -88,7 +85,15 @@ model BST_RankedUserStats {
   oidUser                  Int                      @id
   matchesPlayed            Int                      @default(0)
   matchesWon               Int                      @default(0)
-  eloRating                Int                      @default(1000)  // MMR
+  eloRating                Int                      @default(1000)  // TierIndex * 100 + Pontos
+  rankTier                 String                   @default("BRONZE_3")
+  rankPoints               Int                      @default(0)
+  winStreak                Int                      @default(0)
+  lossProtection           Int                      @default(0)
+  lossesAtZero             Int                      @default(0)
+  md5Wins                  Int                      @default(0)
+  md5Losses                Int                      @default(0)
+  md5Active                Boolean                  @default(false)
   lastMatchAt              DateTime?
   createdAt                DateTime                 @default(now())
   updatedAt                DateTime                 @updatedAt

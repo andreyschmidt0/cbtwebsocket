@@ -59,6 +59,7 @@ export interface PlayerMatchData {
   // Status
   didWin: boolean
   didAbandon: boolean
+  lossMitigationFactor?: number
 }
 
 /**
@@ -77,6 +78,7 @@ export interface MMRCalculationResult {
     abandonPenalty: number
     winStreakBonus: number
     placementSeedingBonus: number
+    lossMitigation: number
   }
 }
 
@@ -129,7 +131,8 @@ export class MatchValidator {
             disadvantageBonus: 0,
             abandonPenalty: MMR_CONFIG.ABANDON_PENALTY,
             winStreakBonus: 0,
-            placementSeedingBonus: 0
+            placementSeedingBonus: 0,
+            lossMitigation: 1
           }
         }
       }
@@ -175,6 +178,14 @@ export class MatchValidator {
 
       // Soma todos os componentes
       let totalChange = baseChange + performanceBonus + disadvantageBonus + winStreakBonus + placementSeedingBonus
+      let mitigationApplied = 1
+
+      if (!player.didWin && totalChange < 0 && player.lossMitigationFactor && player.lossMitigationFactor < 1) {
+        mitigationApplied = player.lossMitigationFactor
+        const mitigatedChange = totalChange * mitigationApplied
+        log('info', `Mitigando perda de ${player.username}: ${totalChange.toFixed(1)} => ${mitigatedChange.toFixed(1)} (fator ${mitigationApplied})`)
+        totalChange = mitigatedChange
+      }
 
       // Aplica limites
       totalChange = Math.max(-maxChange, Math.min(maxChange, totalChange))
@@ -196,7 +207,8 @@ export class MatchValidator {
           disadvantageBonus: Math.round(disadvantageBonus),
           abandonPenalty: 0,
           winStreakBonus: Math.round(winStreakBonus),
-          placementSeedingBonus: Math.round(placementSeedingBonus)
+          placementSeedingBonus: Math.round(placementSeedingBonus),
+          lossMitigation: mitigationApplied
         }
       }
     })

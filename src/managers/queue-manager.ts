@@ -16,6 +16,7 @@ export class QueueManager {
   private readyManager?: ReadyManager
   private currentRoleAllocation?: Map<number, TeamRole>
   private currentRoleAutofill?: Set<number>
+  private readonly EMERGENCY_THRESHOLD_MS = 5 * 60 * 1000
 
   constructor() {
     // Usa cliente Redis singleton (compartilhado com outros managers)
@@ -222,40 +223,48 @@ export class QueueManager {
    */
   private async findMatch(): Promise<QueuePlayer[] | null> {
     const players = Array.from(this.queue.values())
-    players.sort((a, b) => (a.queuedAt || 0) - (b.queuedAt || 0)) // FIFO
+    players.sort((a, b) => (a.queuedAt || 0) - (b.queuedAt || 0))
 
     if (players.length < 10) return null
 
     const now = Date.now()
 
     for (let i = 0; i <= players.length - 10; i++) {
-      const reference = players[i];
+      const reference = players[i]
       const waitMs = reference.queuedAt ? now - reference.queuedAt : 0
       const window = this.getDynamicMMRWindow(reference, waitMs)
-      const mmrMin = reference.mmr - window;
-      const mmrMax = reference.mmr + window;
+      const mmrMin = reference.mmr - window
+      const mmrMax = reference.mmr + window
 
       if (waitMs >= 30000 && (waitMs % 30000) < 4000) {
-        log('debug', `🎯 Expandindo janela para ±${window} (espera ${(waitMs / 1000).toFixed(0)}s) para ${reference.username}`)
+        log('debug', `Expansao de janela para +/-${window} (espera ${(waitMs / 1000).toFixed(0)}s) para ${reference.username}`)
       }
 
       const mmrPool = players.filter(p => p.mmr >= mmrMin && p.mmr <= mmrMax)
-      if (mmrPool.length < 10) {
-        continue
-      }
+      if (mmrPool.length < 10) continue
 
-      const picked = mmrPool.slice(0, Math.min(mmrPool.length, 25));
+      const picked = mmrPool.slice(0, Math.min(mmrPool.length, 25))
       const allowHardAutofill = waitMs >= 120000
       const rolePlayers = this.pickPlayersByRoleContract(picked, allowHardAutofill)
 
       if (rolePlayers) {
-        log('info', `? Match encontrado! (10) MMR range: ${mmrMin}-${mmrMax} (papéis garantidos)`)
-        return rolePlayers;
+        log('info', `Match encontrado! (10) MMR range: ${mmrMin}-${mmrMax} (papeis garantidos)`)
+        return rolePlayers
       }
     }
 
-    log('debug', `? Matchmaking falhou: Não foi possível montar um grupo de 10 com 2 snipers.`)
-    return null;
+    const oldestWait = players[0]?.queuedAt ? now - players[0].queuedAt! : 0
+    if (players.length >= 10 && oldestWait >= this.EMERGENCY_THRESHOLD_MS) {
+      const emergencyPool = players.slice(0, Math.min(players.length, 30))
+      const emergencyMatch = this.pickPlayersByRoleContract(emergencyPool, true)
+      if (emergencyMatch) {
+        log('warn', `Emergencia: preenchendo partida com jogadores aguardando ha ${(oldestWait / 1000).toFixed(0)}s`)
+        return emergencyMatch
+      }
+    }
+
+    log('debug', 'Matchmaking falhou: nao foi possivel montar um grupo com o contrato atual.')
+    return null
   }
   /**
    * Criar match com 10 jogadores (salva APENAS no Redis, não no SQL)
@@ -654,7 +663,7 @@ export class QueueManager {
     if (role === 'SNIPER') {
       if (primary === 'SNIPER') return 0
       if (secondary === 'SNIPER') return 1
-      return null
+      return 5
     }
 
     if (primary === role) return 0
@@ -701,7 +710,7 @@ export class QueueManager {
       if (filled < requiredPerRole[role]) {
         filled += this.selectForRole(pool, role, selected, result, requiredPerRole[role] - filled, 'secondary', allowHardAutofill)
       }
-      if (role !== 'SNIPER' && filled < requiredPerRole[role]) {
+      if (filled < requiredPerRole[role]) {
         filled += this.selectForRole(pool, role, selected, result, requiredPerRole[role] - filled, 'flex', allowHardAutofill)
       }
       if (filled < requiredPerRole[role]) {
@@ -741,7 +750,7 @@ export class QueueManager {
           return classes.secondary === role
         }
         if (role === 'SNIPER') {
-          return false
+          return allowHardAutofill
         }
         if (!allowHardAutofill) {
           return classes.primary === 'SMG' || classes.secondary === 'SMG'

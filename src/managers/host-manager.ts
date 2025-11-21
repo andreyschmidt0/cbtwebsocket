@@ -47,7 +47,7 @@ export class HOSTManager {
   }
 
   // Inicia seleção do HOST
-  async startHostSelection(matchId: string, players: HostPlayer[], mapNumber: number): Promise<void> {
+  async startHostSelection(matchId: string, players: HostPlayer[], mapNumber: number, mapId: string): Promise<void> {
     // Caso o callback seja disparado novamente para o mesmo match (ex: mapa reemitido),
     // limpamos o timer anterior para garantir os 120s completos a partir deste ciclo.
     const previousAttempt = this.activeHosts.get(matchId)
@@ -82,7 +82,8 @@ export class HOSTManager {
       try {
         await prismaRanked.$executeRaw`
           UPDATE BST_RankedMatch
-          SET hostOidUser = ${hostPlayer.oidUser}
+          SET hostOidUser = ${hostPlayer.oidUser},
+              map = ${mapId}
           WHERE id = ${matchId} AND status = 'ready'
         `;
       } catch (error) {
