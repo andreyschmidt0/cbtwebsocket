@@ -351,7 +351,7 @@ export class RankedWebSocketServer {
               username: p.username,
               mmr: p.mmr
             })),
-            timeout: 60 // 60 segundos para aceitar
+            timeout: 20 // 20 segundos para aceitar (documentação)
           }
         })
       }
@@ -1180,19 +1180,23 @@ this.readyManager.onReadyFailed(async (
         await this.redis.expire(key, 24 * 60 * 60)
       }
 
+      // Escalonamento diario: 2a recusa = 5min, 3a = 15min, 4a = 30min, 5+ = 60min
       let seconds = 0
-      if (count === 1) seconds = 60
-      else if (count === 2) seconds = 5 * 60
-      else seconds = 60 * 60
+      if (count === 2) seconds = 5 * 60
+      else if (count === 3) seconds = 15 * 60
+      else if (count === 4) seconds = 30 * 60
+      else if (count >= 5) seconds = 60 * 60
 
-      const endsAt = Date.now() + seconds * 1000
-      await this.redis.set(`cooldown:${ws.oidUser}`, String(endsAt), { EX: seconds })
+      if (seconds > 0) {
+        const endsAt = Date.now() + seconds * 1000
+        await this.redis.set(`cooldown:${ws.oidUser}`, String(endsAt), { EX: seconds })
 
-      // Notifica cliente para bloquear botão localmente
-      this.sendMessage(ws, {
-        type: 'COOLDOWN_SET',
-        payload: { reason: 'DECLINED_READY', seconds, endsAt }
-      })
+        // Notifica cliente para bloquear botao localmente
+        this.sendMessage(ws, {
+          type: 'COOLDOWN_SET',
+          payload: { reason: 'DECLINED_READY', seconds, endsAt, count }
+        })
+      }
     } catch (e) {
       log('warn', 'Falha ao aplicar cooldown de decline', e)
     }
@@ -1837,3 +1841,5 @@ if (require.main === module) {
     log('debug', `📊 Stats: ${stats.connectedPlayers} jogadores conectados`);
   }, 30000);
 }
+
+

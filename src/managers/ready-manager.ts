@@ -16,7 +16,7 @@ interface ReadyCheck {
 export class ReadyManager {
   private activeChecks: Map<string, ReadyCheck> = new Map()
   private redis: ReturnType<typeof getRedisClient>
-  private readonly READY_TIMEOUT = 60000 // 60 segundos
+  private readonly READY_TIMEOUT = 20000 // 20 segundos (conforme documentação)
 
   // --- CORREÇÃO 1: Atualizar a assinatura do callback ---
   private onReadyCompleteCallback?: (matchId: string, lobbyData: any) => void
@@ -86,7 +86,7 @@ export class ReadyManager {
     pipeline.expire(redisKey, 120)
     await pipeline.exec()
 
-    log('info', `Ready check iniciado para match ${matchId} (${playerIds.length} jogadores, 60s) [REDIS]`)
+    log('info', `Ready check iniciado para match ${matchId} (${playerIds.length} jogadores, 20s) [REDIS]`)
   }
 
   // Jogador confirma ready
@@ -159,7 +159,7 @@ async handleReady(matchId: string, oidUser: number): Promise<void> {
     await this.forceCancel(matchId, 'PLAYER_DECLINED', oidUser)
   }
 
-  // Timeout do ready (60s)
+  // Timeout do ready (20s)
   private async handleTimeout(matchId: string): Promise<void> {
     const check = this.activeChecks.get(matchId)
     if (!check) return

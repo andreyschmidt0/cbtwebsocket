@@ -114,15 +114,7 @@ export class QueueManager {
       return { valid: false, reason: 'ALREADY_IN_QUEUE' }
     }
 
-    // Cache de validação para reduzir round-trips no banco
-    try {
-      const cached = await this.redis.get(`player:validated:${oidUser}`)
-      if (cached === 'OK') {
-        return { valid: true }
-      }
-    } catch {}
-
-    // 1.1. Verifica cooldown ativo (Redis)
+    // 1.1 Verifica cooldown ativo (sempre checa, sem cache)
     try {
       const cooldownKey = `cooldown:${oidUser}`
       const cooldownEnds = await this.redis.get(cooldownKey)
@@ -134,14 +126,22 @@ export class QueueManager {
       }
     } catch {}
 
-    // 2. ?? PROTEÇÃO 2: Verifica se outro perfil do mesmo Discord já está na fila
+    // Cache de validação para reduzir round-trips no banco
+    try {
+      const cached = await this.redis.get(`player:validated:${oidUser}`)
+      if (cached === 'OK') {
+        return { valid: true }
+      }
+    } catch {}
+
+    // 2. Proteção: outro perfil do mesmo Discord na fila
     if (discordId) {
       const existingPlayerWithSameDiscord = Array.from(this.queue.values()).find(
         p => p.discordId === discordId && p.oidUser !== oidUser
       )
 
       if (existingPlayerWithSameDiscord) {
-        log('warn', `?? Tentativa de multi-accounting: Discord ${discordId} já tem perfil ${existingPlayerWithSameDiscord.oidUser} na fila`)
+        log('warn', `Tentativa de multi-accounting: Discord ${discordId} já tem perfil ${existingPlayerWithSameDiscord.oidUser} na fila`)
         return {
           valid: false,
           reason: 'DISCORD_ALREADY_IN_QUEUE',
