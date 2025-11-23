@@ -1,5 +1,5 @@
 ﻿import { getRedisClient } from '../database/redis-client'
-import { prismaGame } from '../database/prisma'
+import { prismaGame, prismaRanked } from '../database/prisma'
 import { QueuePlayer, ValidationResult, WeaponTier } from '../types'
 import { log } from '../utils/logger'
 import { ReadyManager } from './ready-manager'
@@ -17,6 +17,7 @@ export class QueueManager {
   private currentRoleAllocation?: Map<number, TeamRole>
   private currentRoleAutofill?: Set<number>
   private readonly EMERGENCY_THRESHOLD_MS = 5 * 60 * 1000
+  private matchCounterSeeded = false
 
   constructor() {
     // Usa cliente Redis singleton (compartilhado com outros managers)
@@ -275,18 +276,20 @@ export class QueueManager {
 
     // Guarda metadados da fila para requeue em caso de falha de host/ready
     try {
-    const snapshot = players.map(p => ({
-      oidUser: p.oidUser,
-      queuedAt: p.queuedAt || Date.now(),
-      classes: p.classes,
-      username: p.username,
-      mmr: p.mmr,
-      assignedRole: this.currentRoleAllocation?.get(p.oidUser),
-      wasAutofill: this.currentRoleAllocation ? this.wasAutofill(p, this.currentRoleAllocation.get(p.oidUser)) : false
-    }))
+      const snapshot = players.map(p => ({
+        oidUser: p.oidUser,
+        queuedAt: p.queuedAt || Date.now(),
+        classes: p.classes,
+        username: p.username,
+        mmr: p.mmr,
+        assignedRole: this.currentRoleAllocation?.get(p.oidUser),
+        wasAutofill: this.currentRoleAllocation ? this.wasAutofill(p, this.currentRoleAllocation.get(p.oidUser)) : false
+      }))
       await this.redis.set(`match:${matchId}:queueSnapshot`, JSON.stringify(snapshot), { EX: 7200 })
     } catch (err) {
       log('warn', `Falha ao armazenar snapshot da fila do match ${matchId}`, err as any)
+      await this.rollbackMatchCreation(matchId, players, 'Falha ao salvar snapshot de fila')
+      return
     }
 
     // Remove jogadores da fila
@@ -324,25 +327,31 @@ export class QueueManager {
     }
 
     // Salva lobby TEMPORÁRIA no Redis (não no SQL!)
-    await this.redis.set(
-      `lobby:temp:${matchId}`,
-      JSON.stringify({
-        matchId,
-        status: 'awaiting-ready',
-        players: players.map(p => ({
-          oidUser: p.oidUser,
-          username: p.username,
-          mmr: p.mmr,
-          classes: p.classes
-        })),
-        teams: {
-          ALPHA: teams.ALPHA.map(p => ({ oidUser: p.player.oidUser, username: p.player.username, mmr: p.player.mmr })),
-          BRAVO: teams.BRAVO.map(p => ({ oidUser: p.player.oidUser, username: p.player.username, mmr: p.player.mmr }))
-        },
-        createdAt: Date.now()
-      }),
-      { EX: 3600 }
-    )
+    try {
+      await this.redis.set(
+        `lobby:temp:${matchId}`,
+        JSON.stringify({
+          matchId,
+          status: 'awaiting-ready',
+          players: players.map(p => ({
+            oidUser: p.oidUser,
+            username: p.username,
+            mmr: p.mmr,
+            classes: p.classes
+          })),
+          teams: {
+            ALPHA: teams.ALPHA.map(p => ({ oidUser: p.player.oidUser, username: p.player.username, mmr: p.player.mmr })),
+            BRAVO: teams.BRAVO.map(p => ({ oidUser: p.player.oidUser, username: p.player.username, mmr: p.player.mmr }))
+          },
+          createdAt: Date.now()
+        }),
+        { EX: 3600 }
+      )
+    } catch (err) {
+      log('error', `Falha ao salvar lobby temporária do match ${matchId}`, err)
+      await this.rollbackMatchCreation(matchId, players, 'Falha ao salvar lobby temp')
+      return
+    }
 
     // Salva classes por jogador para uso na lobby (sobrevive ao ready)
     try {
@@ -366,6 +375,8 @@ export class QueueManager {
       await classesMulti.exec()
     } catch (err) {
         log('error', `Falha ao salvar papéis no Redis para match ${matchId}`, err)
+        await this.rollbackMatchCreation(matchId, players, 'Falha ao salvar classes');
+        return
     }
 
     log('info', `?? Lobby temporária ${matchId} criada (aguardando ready check)`)
@@ -791,14 +802,50 @@ export class QueueManager {
 
   /** Gerar ID sequencial via Redis */
   private async generateMatchId(): Promise<string> {
+    await this.ensureMatchCounterSeeded()
     const counterKey = 'match:counter'
-    const matchNumber = await this.redis.incr(counterKey)
+    let matchNumber: number
     try {
-      await this.redis.expire(counterKey, 60 * 60 * 24) // expira em 24h após o último uso
-    } catch (error) {
-      log('warn', 'Falha ao aplicar TTL em match:counter', error)
+      matchNumber = await this.redis.incr(counterKey)
+    } catch (err) {
+      log('warn', `Falha ao incrementar ${counterKey}, resetando contador`, err)
+      await this.redis.set(counterKey, '0')
+      matchNumber = await this.redis.incr(counterKey)
     }
     return matchNumber.toString()
+  }
+
+  /**
+   * Seed do contador de partidas (evita voltar a 1 em Redis limpo)
+   */
+  private async ensureMatchCounterSeeded(): Promise<void> {
+    if (this.matchCounterSeeded) return
+    const counterKey = 'match:counter'
+    try {
+      const currentRaw = await this.redis.get(counterKey)
+      const row = await prismaRanked.$queryRaw<{ maxId: number }[]>`
+        SELECT ISNULL(MAX(id), 0) AS maxId FROM BST_RankedMatch
+      `
+      const maxId = row?.[0]?.maxId || 0
+      const desired = maxId + 1
+
+      const currentVal = currentRaw !== null ? Number(currentRaw) : null
+      const isValidCurrent = currentVal !== null && Number.isInteger(currentVal)
+
+      // Se já existe um inteiro e está >= desired, mantém. Se for inválido ou menor, sobrescreve.
+      if (!isValidCurrent || (currentVal !== null && currentVal < desired)) {
+        await this.redis.set(counterKey, String(desired))
+        log('warn', `Match counter ajustado para ${desired} (valor anterior ${currentRaw ?? 'null'})`)
+      } else {
+        // Mantém valor atual numérico
+        this.matchCounterSeeded = true
+        return
+      }
+    } catch (err) {
+      log('warn', 'Falha ao seedar match:counter; prosseguindo com INCR padrão', err)
+    } finally {
+      this.matchCounterSeeded = true
+    }
   }
 
   /** Tamanho da fila */
@@ -807,11 +854,50 @@ export class QueueManager {
   getQueuePlayers(): QueuePlayer[] { return Array.from(this.queue.values()) }
   /** Verificar se está na fila */
   isInQueue(oidUser: number): boolean { return this.queue.has(oidUser) }
+  /** Obter jogador na fila */
+  getQueuePlayer(oidUser: number): QueuePlayer | undefined { return this.queue.get(oidUser) }
+
   /** Limpar fila (para testes) */
   async clearQueue(): Promise<void> {
     for (const oidUser of this.queue.keys()) { await this.removeFromQueue(oidUser) }
     log('info', '?? Fila limpa')
   }
+
+  /**
+   * Rollback em falha de persistência ao criar match
+   */
+  private async rollbackMatchCreation(matchId: string, players: QueuePlayer[], reason: string): Promise<void> {
+    log('warn', `Rollback do match ${matchId}: ${reason}. Reenfileirando jogadores.`)
+
+    // Recoloca os jogadores na fila em memória e Redis
+    const multi = this.redis.multi()
+    for (const player of players) {
+      this.queue.set(player.oidUser, player)
+      multi.set(
+        `queue:ranked:${player.oidUser}`,
+        JSON.stringify({
+          oidUser: player.oidUser,
+          username: player.username,
+          mmr: player.mmr,
+          classes: player.classes,
+          queuedAt: player.queuedAt || Date.now()
+        }),
+        { EX: 3600 }
+      )
+    }
+    await multi.exec()
+
+    // Limpa artefatos do match
+    try {
+      await this.redis.del(`match:${matchId}:queueSnapshot`)
+      await this.redis.del(`lobby:temp:${matchId}`)
+      await this.redis.del(`match:${matchId}:classes`)
+    } catch {}
+
+    // Apenas loga; camada superior decide reenfileirar novamente se necessário
+    log('warn', `Match ${matchId} cancelado por falha de persistência: ${reason}`)
+  }
+
   /** Parar matchmaking (graceful shutdown) */
   stop(): void {
     if (this.matchmakingInterval) {
@@ -822,6 +908,3 @@ export class QueueManager {
   }
 
 }
-
-
-

@@ -823,23 +823,34 @@ export class ValidationManager {
     const backgroundId = getBackgroundIdForTier(tier)
     if (!backgroundId) return
 
-    try {
-      await prismaGame.$executeRaw`
-        MERGE COMBATARMS.dbo.CBT_User_NickName_Background AS target
-        USING (SELECT ${oidUser} AS oidUser) AS source
-        ON target.oidUser = source.oidUser
-        WHEN MATCHED THEN
-          UPDATE SET
-            Background = ${backgroundId},
-            Emblem = 0,
-            EndDate = '2500-12-31 23:59:59'
-        WHEN NOT MATCHED THEN
-          INSERT (oidUser, Background, Emblem, EndDate)
-          VALUES (${oidUser}, ${backgroundId}, 0, '2500-12-31 23:59:59');
-      `
-    } catch (error) {
-      log('warn', `Falha ao aplicar brasão de elo para ${oidUser} (${tier})`, error)
+    const attempts = 3
+    for (let i = 1; i <= attempts; i++) {
+      try {
+        await prismaGame.$executeRaw`
+          MERGE COMBATARMS.dbo.CBT_User_NickName_Background AS target
+          USING (SELECT ${oidUser} AS oidUser) AS source
+          ON target.oidUser = source.oidUser
+          WHEN MATCHED THEN
+            UPDATE SET
+              Background = ${backgroundId},
+              Emblem = 0,
+              EndDate = '2500-12-31 23:59:59'
+          WHEN NOT MATCHED THEN
+            INSERT (oidUser, Background, Emblem, EndDate)
+            VALUES (${oidUser}, ${backgroundId}, 0, '2500-12-31 23:59:59');
+        `
+        return
+      } catch (error) {
+        const isLast = i === attempts
+        log(isLast ? 'error' : 'warn', `Falha ao aplicar brasão de elo (tentativa ${i}/${attempts}) para ${oidUser} (${tier})`, error)
+        if (isLast) break
+        await this.sleep(500 * i) // backoff linear simples
+      }
     }
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms))
   }
   /**
    * Trata timeout de validação (50 minutos sem logs)

@@ -39,6 +39,37 @@ interface TokenValidationResult {
   reason?: string;
 }
 
+// Erros de domínio para mapear UX/ações
+const DOMAIN_ERRORS = {
+  QUEUE_FAILED: {
+    default: 'Não foi possível entrar na fila.',
+  },
+  LOBBY_MISSING: {
+    default: 'Match indisponível, retornando à fila.'
+  },
+  READY_MISSING: {
+    default: 'Match indisponível, retornando à fila.'
+  },
+  HOST_TIMEOUT: {
+    default: 'Host não confirmou a sala a tempo.'
+  },
+  HOST_FAILED: {
+    default: 'Falha ao criar sala.'
+  },
+  VALIDATION_TIMEOUT: {
+    default: 'Partida não validada – sem perda de pontos.'
+  },
+  VALIDATION_INVALID: {
+    default: 'Partida cancelada – abandonos podem ser penalizados.'
+  },
+  AUTH_INVALID: {
+    default: 'Reautentique-se para continuar.'
+  },
+  LOBBY_UNAUTHORIZED: {
+    default: 'Você não está autorizado a entrar nesta lobby.'
+  }
+} as const;
+
 
 /**
  * Servidor WebSocket para Ranked Matchmaking
@@ -91,6 +122,29 @@ export class RankedWebSocketServer {
     this.app.get('/health', (_req, res) => {
       res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
     });
+    // Rota rápida para verificar lobby ativa de um jogador
+    this.app.get('/active-lobby/:oidUser', async (req, res) => {
+      const oidUser = Number(req.params.oidUser);
+      if (!oidUser) {
+        return res.status(400).json({ error: 'oidUser inválido' });
+      }
+      try {
+        const key = `player:${oidUser}:activeLobby`;
+        const matchId = await this.redis.get(key);
+        if (!matchId) {
+          return res.status(404).json({ error: 'Nenhuma lobby ativa' });
+        }
+        const lobby = this.lobbyManager.getLobby(matchId);
+        if (!lobby) {
+          await this.redis.del(key);
+          return res.status(404).json({ error: 'Lobby expirada' });
+        }
+        return res.status(200).json({ matchId, redirectTo: `/lobby/${matchId}` });
+      } catch (err) {
+        log('error', 'Falha ao checar lobby ativa', err);
+        return res.status(500).json({ error: 'Erro ao checar lobby ativa' });
+      }
+    });
     
     // 4. Anexar o WebSocketServer ao Servidor HTTP
     this.wss = new WebSocketServer({ server: this.httpServer });
@@ -136,51 +190,51 @@ export class RankedWebSocketServer {
 
         const abandonmentSet = new Set(result.abandonments);
         const playerSummaries = matchPlayers.map(player => {
-          const kills = Number(player.kills) || 0;
-          const deaths = Number(player.deaths) || 0;
-          const assists = Number(player.assists) || 0;
-          const headshots = Number(player.headshots) || 0;
-          const mmrChange = Number(player.mmrChange) || 0;
-          const storedTier = (player.rankTier as RankTier) || 'BRONZE_3';
-          const storedPoints = Number(player.rankPoints ?? 0);
-          const storedMatchValue = Number(player.matchmakingRating ?? 0);
-          const currentMatchValue = storedMatchValue > 0
-            ? storedMatchValue
-            : computeMatchmakingValue(storedTier, storedPoints);
-          const oldMatchValue = currentMatchValue - mmrChange;
-          const kdRatio = deaths > 0 ? parseFloat((kills / deaths).toFixed(2)) : kills;
-          const didWin = result.winner ? player.team === result.winner : null;
+            const kills = Number(player.kills) || 0;
+            const deaths = Number(player.deaths) || 0;
+            const assists = Number(player.assists) || 0;
+            const headshots = Number(player.headshots) || 0;
+            const mmrChange = Number(player.mmrChange) || 0;
+            const storedTier = (player.rankTier as RankTier) || 'BRONZE_3';
+            const storedPoints = Number(player.rankPoints ?? 0);
+            const storedMatchValue = Number(player.matchmakingRating ?? 0);
+            const currentMatchValue = storedMatchValue > 0
+              ? storedMatchValue
+              : computeMatchmakingValue(storedTier, storedPoints);
+            const oldMatchValue = currentMatchValue - mmrChange;
+            const kdRatio = deaths > 0 ? parseFloat((kills / deaths).toFixed(2)) : kills;
+            const didWin = result.winner ? player.team === result.winner : null;
 
-          // Adiciona recompensas com base nas suas regras
-          const rewards = {
-            cash: didWin === true ? 50 : 0,
-            clanExp: didWin === true ? 10 : 5 // 5 por jogar, +5 por vencer
-          };
+            // Adiciona recompensas com base nas suas regras
+            const rewards = {
+              cash: didWin === true ? 50 : 0,
+              clanExp: didWin === true ? 10 : 5 // 5 por jogar, +5 por vencer
+            };
 
-          return {
-            oidUser: player.oidUser,
-            username: player.username || `Player ${player.oidUser}`,
-            team: player.team,
-            result: didWin === null ? 'PENDING' : (didWin ? 'WIN' : 'LOSS'),
-            abandoned: abandonmentSet.has(player.oidUser),
-            mmr: {
-              old: oldMatchValue,
-              new: currentMatchValue,
-              change: mmrChange
-            },
-            rank: {
-              tier: storedTier,
-              tierLabel: formatTierLabel(storedTier),
-              points: storedPoints
-            },
-            stats: {
-              kills,
-              deaths,
-              assists,
-              headshots,
-              kdRatio
-            },
-            rewards: rewards
+            return {
+              oidUser: player.oidUser,
+              username: player.username || `Player ${player.oidUser}`,
+              team: player.team,
+              result: didWin === null ? 'PENDING' : (didWin ? 'WIN' : 'LOSS'),
+              abandoned: abandonmentSet.has(player.oidUser),
+              mmr: {
+                old: oldMatchValue,
+                new: currentMatchValue,
+                change: mmrChange
+              },
+              rank: {
+                tier: storedTier,
+                tierLabel: formatTierLabel(storedTier),
+                points: storedPoints
+              },
+              stats: {
+                kills,
+                deaths,
+                assists,
+                headshots,
+                kdRatio
+              },
+              rewards: rewards
           };
         });
 
@@ -213,7 +267,7 @@ export class RankedWebSocketServer {
             payload: {
               matchId,
               reason: 'timeout',
-              message: 'Partida não detectada no sistema (timeout de validação)'
+              message: DOMAIN_ERRORS.VALIDATION_TIMEOUT.default
             }
           }
         );
@@ -233,7 +287,7 @@ export class RankedWebSocketServer {
             payload: {
               matchId,
               reason,
-              message: `Partida cancelada: ${reason}`
+              message: DOMAIN_ERRORS.VALIDATION_INVALID.default
             }
           }
         );
@@ -245,29 +299,9 @@ export class RankedWebSocketServer {
 
     // Callback para quando o HOSTManager aborta a sala (timeout ou falha do host)
     this.hostManager.onHostAborted(async (matchId, hostOidUser, reason, playerIds = []) => {
-      // ... (lógica de onHostAborted - sem mudanças) ...
       log('warn', `HOST abortado para match ${matchId} (hostOidUser=${hostOidUser}, reason=${reason})`);
 
-      // Snapshot de fila para preservar prioridades
-      const snapshotByPlayer: Record<number, { queuedAt?: number; classes?: QueuePlayer['classes'] }> = {};
-      try {
-        const snapshotRaw = await this.redis.get(`match:${matchId}:queueSnapshot`);
-        if (snapshotRaw) {
-          const parsed = JSON.parse(snapshotRaw);
-          if (Array.isArray(parsed)) {
-            for (const entry of parsed) {
-              if (entry && typeof entry.oidUser === 'number') {
-                snapshotByPlayer[entry.oidUser] = {
-                  queuedAt: entry.queuedAt,
-                  classes: entry.classes
-                };
-              }
-            }
-          }
-        }
-      } catch (err) {
-        log('warn', `Falha ao carregar snapshot da fila para match ${matchId}`, err);
-      }
+      const snapshotByPlayer = await this.getQueueSnapshotByPlayer(matchId);
 
       // Remove o host da fila (ele não deve voltar automaticamente)
       await this.queueManager.removeFromQueue(hostOidUser);
@@ -276,32 +310,38 @@ export class RankedWebSocketServer {
         payload: { reason }
       });
 
+      const hostTimeout = reason === 'TIMEOUT';
+      const message = hostTimeout
+        ? 'O host não confirmou a sala no tempo. Voltamos para a fila.'
+        : 'O host não criou a sala. Você voltou para a fila.';
+
       // Persiste prioridade para cada jogador e notifica retorno à fila
       for (const oid of playerIds) {
         if (oid === hostOidUser) continue;
 
         const snapshotEntry = snapshotByPlayer[oid];
-        if (snapshotEntry) {
-          try {
-            await this.redis.set(
-              `requeue:ranked:${oid}`,
-              JSON.stringify({
-                queuedAt: snapshotEntry.queuedAt,
-                classes: snapshotEntry.classes
-              }),
-              { EX: 600 }
-            );
-          } catch (err) {
-            log('warn', `Falha ao preparar dados de requeue para player ${oid}`, err);
-          }
+        const queuedAtFallback = snapshotEntry?.queuedAt || Date.now();
+        const classesFallback = snapshotEntry?.classes || null;
+
+        try {
+          await this.redis.set(
+            `requeue:ranked:${oid}`,
+            JSON.stringify({
+              queuedAt: queuedAtFallback,
+              classes: classesFallback
+            }),
+            { EX: 600 }
+          );
+        } catch (err) {
+          log('warn', `Falha ao preparar dados de requeue para player ${oid}`, err);
         }
 
         this.sendToPlayer(oid, {
           type: 'REQUEUE',
           payload: {
-            message: 'O host não criou a sala. Você voltou para a fila.',
+            message,
             reason,
-            queuedAt: snapshotEntry?.queuedAt || Date.now()
+            queuedAt: queuedAtFallback
           }
         });
       }
@@ -465,21 +505,21 @@ this.readyManager.onReadyFailed(async (
         if (oid === causeOidUser) continue;
 
         const snapshotEntry = snapshotByPlayer[oid];
+        const queuedAtFallback = snapshotEntry?.queuedAt || Date.now();
+        const classesFallback = snapshotEntry?.classes || null;
         
         // Salva os dados de prioridade no Redis para o próximo QUEUE_JOIN
-        if (snapshotEntry) {
-          try {
-            await this.redis.set(
-              `requeue:ranked:${oid}`,
-              JSON.stringify({
-                queuedAt: snapshotEntry.queuedAt,
-                classes: snapshotEntry.classes
-              }),
-              { EX: 600 } // 10 minutos para reconectar e entrar na fila
-            );
-          } catch (err) {
-            log('warn', `Falha ao preparar dados de requeue para player ${oid}`, err);
-          }
+        try {
+          await this.redis.set(
+            `requeue:ranked:${oid}`,
+            JSON.stringify({
+              queuedAt: queuedAtFallback,
+              classes: classesFallback
+            }),
+            { EX: 600 } // 10 minutos para reconectar e entrar na fila
+          );
+        } catch (err) {
+          log('warn', `Falha ao preparar dados de requeue para player ${oid}`, err);
         }
 
         // Notifica o cliente para voltar à fila
@@ -489,7 +529,7 @@ this.readyManager.onReadyFailed(async (
             message: 'Um jogador recusou a partida. Você foi colocado de volta na fila.',
             reason,
             // Envia o tempo de fila original para o cliente recalcular o timer
-            queuedAt: snapshotEntry?.queuedAt || Date.now() 
+            queuedAt: queuedAtFallback
           }
         });
       }
@@ -793,6 +833,12 @@ this.readyManager.onReadyFailed(async (
           await this.handleAuth(ws, payload)
           break
 
+        case 'HEARTBEAT':
+          // Mantém a conexão viva e evita erro de tipo inválido
+          ;(ws as AuthenticatedWebSocket).isAlive = true
+          this.sendMessage(ws, { type: 'PONG' })
+          break
+
         case 'QUEUE_JOIN':
           await this.handleQueueJoin(ws, payload)
           break
@@ -898,7 +944,7 @@ this.readyManager.onReadyFailed(async (
         type: 'AUTH_FAILED',
         payload: {
           reason: tokenValidation.reason || 'INVALID_TOKEN',
-          message: 'Token inválido ou sessão expirada'
+          message: DOMAIN_ERRORS.AUTH_INVALID.default
         }
       })
       return ws.close()
@@ -1080,6 +1126,12 @@ this.readyManager.onReadyFailed(async (
       return this.sendError(ws, 'matchId ausente em READY_ACCEPT')
     }
 
+    // Se o ready expirou/sumiu, requeue automático
+    if (!this.readyManager.getActiveCheck(String(matchId)) && !this.lobbyManager.getLobby(String(matchId))) {
+      await this.handleLobbyOrReadyExpired(String(matchId), 'READY_MISSING', ws.oidUser ? [ws.oidUser] : [])
+      return
+    }
+
     await this.readyManager.handleReady(String(matchId), ws.oidUser)
     log('debug', `✅ ${ws.username} aceitou match ${matchId}`)
 
@@ -1157,6 +1209,12 @@ this.readyManager.onReadyFailed(async (
     const { matchId } = payload || {}
     if (!matchId) {
       return this.sendError(ws, 'matchId ausente em READY_DECLINE')
+    }
+
+    // Se o ready expirou/sumiu, requeue automático
+    if (!this.readyManager.getActiveCheck(String(matchId)) && !this.lobbyManager.getLobby(String(matchId))) {
+      await this.handleLobbyOrReadyExpired(String(matchId), 'READY_MISSING', ws.oidUser ? [ws.oidUser] : [])
+      return
     }
 
     log('debug', `❌ ${ws.username} recusou match ${matchId}`)
@@ -1241,12 +1299,20 @@ this.readyManager.onReadyFailed(async (
     if (!ws.oidUser) return;
     const { matchId } = payload || {};
     if (!matchId) {
-      this.sendError(ws, 'matchId ausente em LOBBY_JOIN');
+      this.sendError(ws, DOMAIN_ERRORS.LOBBY_UNAUTHORIZED.default);
       return;
     }
     const lobby = this.lobbyManager.getLobby(matchId);
     if (!lobby) {
-      this.sendError(ws, 'Lobby não encontrada');
+      // Lobby expirou/sumiu: avisa o cliente e requeue automático com fallback
+      this.sendMessage(ws, {
+        type: 'LOBBY_NOT_FOUND',
+        payload: {
+          matchId,
+          message: 'Lobby indisponível. Você voltará para a fila.'
+        }
+      });
+      await this.handleLobbyOrReadyExpired(matchId, 'LOBBY_MISSING', ws.oidUser ? [ws.oidUser] : []);
       return;
     }
     const isAlpha = lobby.teams.ALPHA.some(player => player.oidUser === ws.oidUser);
@@ -1383,7 +1449,7 @@ this.readyManager.onReadyFailed(async (
     const success = await this.lobbyManager.vetoMap(matchId, playerTeam, mapId, 'PLAYER')
 
     if (!success) {
-      this.sendError(ws, 'Erro ao vetar mapa')
+      this.sendError(ws, 'Falha ao registrar veto, tente novamente')
       return
     }
 
@@ -1403,7 +1469,7 @@ this.readyManager.onReadyFailed(async (
 
     const success = await this.lobbyManager.voteMap(matchId, ws.oidUser, mapId)
     if (!success) {
-      this.sendError(ws, 'Erro ao registrar voto')
+      this.sendError(ws, 'Falha ao registrar veto, tente novamente')
       return
     }
 
@@ -1441,7 +1507,7 @@ this.readyManager.onReadyFailed(async (
 
     const chatResult = await this.lobbyManager.addChatMessage(matchId, ws.oidUser, message.trim(), normalizedChannel)
     if (!chatResult) {
-      this.sendError(ws, 'Erro ao enviar mensagem')
+      this.sendError(ws, 'Falha ao registrar mensagem no chat, tente novamente')
       return
     }
 
@@ -1720,6 +1786,107 @@ private async validateAuthToken(params: TokenValidationParams): Promise<TokenVal
   }
 
   /**
+   * Requeue automático quando lobby/ready sumirem
+   */
+  private async handleLobbyOrReadyExpired(matchId: string, reason: string, fallbackPlayerIds: number[] = []): Promise<void> {
+    let playerIds = await this.getMatchPlayerIds(matchId);
+    if (playerIds.length === 0 && fallbackPlayerIds.length > 0) {
+      playerIds = fallbackPlayerIds;
+    }
+    if (playerIds.length === 0) {
+      log('warn', `[LobbyExpired ${matchId}] Nenhum jogador encontrado para requeue`);
+      return;
+    }
+
+    const snapshotByPlayer = await this.getQueueSnapshotByPlayer(matchId);
+    await this.lobbyManager.clearActiveLobbyForPlayers(playerIds);
+
+    for (const oid of playerIds) {
+      const snapshotEntry = snapshotByPlayer[oid];
+      const queuedAtFallback = snapshotEntry?.queuedAt || Date.now();
+      const classesFallback = snapshotEntry?.classes || null;
+
+      try {
+        await this.redis.set(
+          `requeue:ranked:${oid}`,
+          JSON.stringify({
+            queuedAt: queuedAtFallback,
+            classes: classesFallback
+          }),
+          { EX: 600 }
+        );
+      } catch (err) {
+        log('warn', `Falha ao preparar dados de requeue (lobby expired) para player ${oid}`, err);
+      }
+
+      this.sendToPlayer(oid, {
+        type: 'REQUEUE',
+        payload: {
+          message: 'Match indisponível, retornando à fila.',
+          reason,
+          queuedAt: queuedAtFallback
+        }
+      });
+    }
+
+    try {
+      await this.redis.del(`match:${matchId}:queueSnapshot`);
+    } catch { }
+  }
+
+  private async getQueueSnapshotByPlayer(matchId: string): Promise<Record<number, { queuedAt?: number; classes?: QueuePlayer['classes'] }>> {
+    const snapshotByPlayer: Record<number, { queuedAt?: number; classes?: QueuePlayer['classes'] }> = {};
+    try {
+      const snapshotRaw = await this.redis.get(`match:${matchId}:queueSnapshot`);
+      if (snapshotRaw) {
+        const parsed = JSON.parse(snapshotRaw);
+        if (Array.isArray(parsed)) {
+          for (const entry of parsed) {
+            if (entry && typeof entry.oidUser === 'number') {
+              snapshotByPlayer[entry.oidUser] = {
+                queuedAt: entry.queuedAt,
+                classes: entry.classes
+              };
+            }
+          }
+        }
+      }
+    } catch (err) {
+      log('warn', `Falha ao carregar snapshot da fila para match ${matchId}`, err);
+    }
+    return snapshotByPlayer;
+  }
+
+  private async getMatchPlayerIds(matchId: string): Promise<number[]> {
+    // Tenta pela hash de ready
+    try {
+      const readyEntries = await this.redis.hGetAll(`match:${matchId}:ready`);
+      const ids = Object.keys(readyEntries || {})
+        .filter(k => k && !k.startsWith('_'))
+        .map(k => parseInt(k, 10))
+        .filter(n => !Number.isNaN(n));
+      if (ids.length > 0) return ids;
+    } catch {}
+
+    // Tenta pelo snapshot salvo
+    try {
+      const snapshotRaw = await this.redis.get(`match:${matchId}:queueSnapshot`);
+      if (snapshotRaw) {
+        const parsed = JSON.parse(snapshotRaw);
+        if (Array.isArray(parsed)) {
+          const ids = parsed
+            .map((p: any) => (p && typeof p.oidUser === 'number' ? p.oidUser : null))
+            .filter((n: number | null) => n !== null) as number[];
+          if (ids.length > 0) return ids;
+        }
+      }
+    } catch {}
+
+    // Fallback vazio
+    return [];
+  }
+
+  /**
    * Enviar mensagem para jogador específico
    */
   sendToPlayer(oidUser: number, message: WSMessage): boolean {
@@ -1841,5 +2008,4 @@ if (require.main === module) {
     log('debug', `📊 Stats: ${stats.connectedPlayers} jogadores conectados`);
   }, 30000);
 }
-
 

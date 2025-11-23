@@ -55,6 +55,7 @@ export class LobbyManager {
   private lobbies: Map<string, LobbyState> = new Map()
   private redis: ReturnType<typeof getRedisClient>
   private rankedMapPool: { mapId: string, mapName: string, mapNumber: number }[] = []
+  private activeLobbyKey = (oidUser: number) => `player:${oidUser}:activeLobby`
 
   // Callbacks
   private onMapSelectedCallback?: (matchId: string, mapId: string) => void
@@ -168,6 +169,10 @@ constructor() {
     }
 
     this.lobbies.set(matchId, lobbyState)
+    await this.setActiveLobbyForPlayers(matchId, [
+      ...teams.ALPHA.map(p => p.oidUser),
+      ...teams.BRAVO.map(p => p.oidUser),
+    ])
 
     // Salva no Redis
     await this.redis.set(
@@ -632,6 +637,11 @@ async executeRoleSwap(
    * Remover lobby
    */
   async removeLobby(matchId: string): Promise<void> {
+    const lobby = this.lobbies.get(matchId)
+    const playerIds = lobby
+      ? [...lobby.teams.ALPHA, ...lobby.teams.BRAVO].map(p => p.oidUser)
+      : []
+
     // Limpa timer de veto
     const timer = this.vetoTimers.get(matchId)
     if (timer) {
@@ -645,10 +655,12 @@ async executeRoleSwap(
     await this.redis.del(`lobby:${matchId}:votes`)
     await this.redis.del(`lobby:${matchId}:vetos`)
     await this.redis.del(`lobby:${matchId}:selectedMap`)
+    if (playerIds.length) {
+      await this.clearActiveLobbyForPlayers(playerIds)
+    }
 
-    log('info', `🗑️ Lobby ${matchId} removida`)
+    log('info', `Lobby ${matchId} removida`)
   }
-
   /**
    * Limpar todas as lobbies (shutdown)
    */
@@ -656,13 +668,37 @@ async executeRoleSwap(
     for (const matchId of this.lobbies.keys()) {
       await this.removeLobby(matchId)
     }
-    log('info', '🧹 Todas as lobbies limpas')
+    log('info', 'Todas as lobbies limpas')
   }
 
   /**
    * Parar manager (shutdown)
    */
   stop(): void {
-    log('info', '🛑 LobbyManager parado')
+    log('info', 'LobbyManager parado')
+  }
+
+  /**
+   * Marca jogadores como pertencentes a uma lobby ativa (índice rápido player -> lobby)
+   */
+  private async setActiveLobbyForPlayers(matchId: string, playerIds: number[]): Promise<void> {
+    if (!playerIds.length) return
+    const multi = this.redis.multi()
+    for (const oid of playerIds) {
+      multi.set(this.activeLobbyKey(oid), matchId, { EX: 3600 })
+    }
+    await multi.exec()
+  }
+
+  /**
+   * Limpa o mapeamento player -> lobby (quando lobby é finalizada ou expira)
+   */
+  async clearActiveLobbyForPlayers(playerIds: number[]): Promise<void> {
+    if (!playerIds.length) return
+    const multi = this.redis.multi()
+    for (const oid of playerIds) {
+      multi.del(this.activeLobbyKey(oid))
+    }
+    await multi.exec()
   }
 }
