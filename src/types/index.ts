@@ -46,4 +46,5 @@ export interface ValidationResult {
   endsAt?: number;
   until?: Date;
   existingAccount?: string; // Nome da conta existente (para multi-accounting)
+  matchId?: string; // Lobby ativa vinculada ao jogador
 }

@@ -115,6 +115,14 @@ export class QueueManager {
       return { valid: false, reason: 'ALREADY_IN_QUEUE' }
     }
 
+    // 1.0 Verifica se ainda há lobby ativa registrada para o jogador
+    try {
+      const activeLobby = await this.redis.get(`player:${oidUser}:activeLobby`)
+      if (activeLobby) {
+        return { valid: false, reason: 'ACTIVE_LOBBY', matchId: activeLobby }
+      }
+    } catch {}
+
     // 1.1 Verifica cooldown ativo (sempre checa, sem cache)
     try {
       const cooldownKey = `cooldown:${oidUser}`
@@ -824,18 +832,19 @@ export class QueueManager {
     try {
       const currentRaw = await this.redis.get(counterKey)
       const row = await prismaRanked.$queryRaw<{ maxId: number }[]>`
-        SELECT ISNULL(MAX(id), 0) AS maxId FROM BST_RankedMatch
+        SELECT ISNULL(MAX(TRY_CAST(id AS BIGINT)), 0) AS maxId FROM BST_RankedMatch
       `
       const maxId = row?.[0]?.maxId || 0
-      const desired = maxId + 1
+      // Mantemos o contador no maior ID existente; o próximo INCR gerará maxId+1
+      const desiredBase = maxId
 
       const currentVal = currentRaw !== null ? Number(currentRaw) : null
       const isValidCurrent = currentVal !== null && Number.isInteger(currentVal)
 
-      // Se já existe um inteiro e está >= desired, mantém. Se for inválido ou menor, sobrescreve.
-      if (!isValidCurrent || (currentVal !== null && currentVal < desired)) {
-        await this.redis.set(counterKey, String(desired))
-        log('warn', `Match counter ajustado para ${desired} (valor anterior ${currentRaw ?? 'null'})`)
+      // Se já existe um inteiro e está >= desiredBase, mantém. Se for inválido ou menor, sobrescreve.
+      if (!isValidCurrent || (currentVal !== null && currentVal < desiredBase)) {
+        await this.redis.set(counterKey, String(desiredBase))
+        log('warn', `Match counter ajustado para ${desiredBase} (valor anterior ${currentRaw ?? 'null'})`)
       } else {
         // Mantém valor atual numérico
         this.matchCounterSeeded = true

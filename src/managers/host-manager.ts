@@ -225,6 +225,18 @@ export class HOSTManager {
     }
   }
 
+  /**
+   * Aborta for��adamente o fluxo de HOST para um match, sem aplicar cooldown ao host.
+   * Retorna os jogadores envolvidos na tentativa (se houver).
+   */
+  async forceAbortByMatch(matchId: string, reason: string): Promise<number[]> {
+    const attempt = this.activeHosts.get(matchId)
+    const playerIds = attempt ? attempt.players.map(p => p.oidUser) : []
+
+    await this.abortAndCleanup(matchId, reason)
+    return playerIds
+  }
+
   // Cleanup completo (Redis + memória)
   private async abortAndCleanup(matchId: string, reason: string): Promise<void> {
     const attempt = this.activeHosts.get(matchId)

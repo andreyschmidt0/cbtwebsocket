@@ -898,6 +898,10 @@ this.readyManager.onReadyFailed(async (
 		  }
 		  break;
 
+        case 'LOBBY_ABANDON':
+          await this.handleLobbyAbandon(ws, payload);
+          break;
+
         default:
           log('warn', `⚠️ Mensagem desconhecida: ${message.type}`)
           this.sendError(ws, 'Tipo de mensagem inválido')
@@ -982,6 +986,17 @@ this.readyManager.onReadyFailed(async (
       type: 'AUTH_SUCCESS',
       payload: { oidUser, username: ws.username }
     })
+
+    // Se o jogador tinha uma lobby ativa, reenvia os dados completos (suporte a F5)
+    try {
+      const activeLobbyId = await this.redis.get(`player:${oidUser}:activeLobby`);
+      if (activeLobbyId) {
+        log('debug', `[AUTH] Reenviando LOBBY_DATA para ${oidUser} (lobby ${activeLobbyId})`);
+        await this.handleLobbyJoin(ws, { matchId: activeLobbyId });
+      }
+    } catch (err) {
+      log('warn', `Falha ao reemitir LOBBY_DATA pós-AUTH para ${oidUser}`, err);
+    }
   }
 
   /**
@@ -1257,6 +1272,127 @@ this.readyManager.onReadyFailed(async (
       }
     } catch (e) {
       log('warn', 'Falha ao aplicar cooldown de decline', e)
+    }
+  }
+
+  /**
+   * LOBBY_ABANDON - Jogador desistiu da lobby antes da partida começar
+   */
+  private async handleLobbyAbandon(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+
+    const { matchId } = payload || {};
+    if (!matchId) {
+      this.sendError(ws, 'matchId ausente em LOBBY_ABANDON');
+      return;
+    }
+
+    const lobby = this.lobbyManager.getLobby(matchId);
+    const redisStatus = await this.redis.get(`match:${matchId}:status`).catch(() => null);
+    const inProgress = this.validationManager.isValidating(matchId) || redisStatus === 'in-progress';
+    const shouldPenalize = true; // Sempre penaliza abandono de lobby
+
+    // Aplica punição incremental (mesma base do decline de READY, mas com janelas 30m/2h/24h)
+    if (shouldPenalize) {
+      const penalty = await this.applyAbandonPenalty(ws.oidUser);
+      if (penalty.seconds > 0) {
+        this.sendMessage(ws, {
+          type: 'COOLDOWN_SET',
+          payload: {
+            reason: 'ABANDON_MATCH',
+            seconds: penalty.seconds,
+            endsAt: penalty.endsAt,
+            count: penalty.count
+          }
+        });
+      }
+      try {
+        await this.lobbyManager.clearActiveLobbyForPlayers([ws.oidUser]);
+      } catch {}
+    }
+
+    // Caso 3: partida já em andamento - apenas penaliza e encerra
+    if (inProgress) {
+      return;
+    }
+
+    // Caso 1/2: fase de vetos ou criação de sala - cancela lobby e requeueia os outros 9
+    let playerIds: number[] = [];
+    if (lobby) {
+      playerIds = [
+        ...lobby.teams.ALPHA.map(p => p.oidUser),
+        ...lobby.teams.BRAVO.map(p => p.oidUser)
+      ];
+    }
+    if (playerIds.length === 0) {
+      playerIds = await this.getMatchPlayerIds(matchId);
+    }
+    if (playerIds.length === 0) {
+      this.sendError(ws, 'Lobby/Match não encontrado para abandono');
+      return;
+    }
+
+    const snapshotByPlayer = await this.getQueueSnapshotByPlayer(matchId);
+    const requeueMessage = 'Um jogador desistiu da lobby. Você voltou para a fila.';
+
+    for (const oid of playerIds) {
+      if (oid === ws.oidUser) continue; // apenas os outros retornam para a fila
+      const entry = snapshotByPlayer[oid];
+      const queuedAt = entry?.queuedAt || Date.now();
+      const classes = entry?.classes || null;
+
+      try {
+        await this.redis.set(
+          `requeue:ranked:${oid}`,
+          JSON.stringify({ queuedAt, classes }),
+          { EX: 600 }
+        );
+      } catch (err) {
+        log('warn', `Falha ao preparar requeue (LOBBY_ABANDON) para player ${oid}`, err);
+      }
+
+      this.sendToPlayer(oid, {
+        type: 'REQUEUE',
+        payload: {
+          message: requeueMessage,
+          reason: 'LOBBY_ABANDON',
+          queuedAt
+        }
+      });
+    }
+
+    // Limpa estado de lobby/host e artefatos de Redis mesmo que o host não tenha criado sala
+    if (lobby) {
+      await this.lobbyManager.removeLobby(matchId);
+    }
+    try {
+      await this.hostManager.forceAbortByMatch(matchId, 'ABANDON_LOBBY');
+    } catch (err) {
+      log('warn', `Falha ao abortar host para ${matchId} após abandono`, err);
+    }
+
+    // Cleanup adicional defensivo para evitar chaves órfãs
+    const cleanupKeys = [
+      `match:${matchId}:status`,
+      `match:${matchId}:queueSnapshot`,
+      `match:${matchId}:ready`,
+      `match:${matchId}:classes`,
+      `match:${matchId}:host`,
+      `match:${matchId}:hostPassword`,
+      `match:${matchId}:room`,
+      `room:${matchId}`,
+      `lobby:temp:${matchId}`,
+      `lobby:${matchId}:state`,
+      `lobby:${matchId}:vetos`,
+      `lobby:${matchId}:votes`,
+      `lobby:${matchId}:selectedMap`
+    ];
+    try {
+      if (cleanupKeys.length) {
+        await this.redis.del(cleanupKeys);
+      }
+    } catch (err) {
+      log('warn', `Falha ao limpar chaves da lobby ${matchId} após abandono`, err);
     }
   }
 
@@ -1855,6 +1991,32 @@ private async validateAuthToken(params: TokenValidationParams): Promise<TokenVal
       log('warn', `Falha ao carregar snapshot da fila para match ${matchId}`, err);
     }
     return snapshotByPlayer;
+  }
+
+  /**
+   * Aplica puni��o incremental por abandonar uma partida em andamento.
+   */
+  private async applyAbandonPenalty(oidUser: number): Promise<{ count: number; seconds: number; endsAt: number | null }> {
+    const counterKey = `abandon:count:${oidUser}`;
+    const count = await this.redis.incr(counterKey);
+    const ttl = await this.redis.ttl(counterKey);
+    if (ttl < 0) {
+      await this.redis.expire(counterKey, 24 * 60 * 60); // janela de 24h
+    }
+
+    let seconds = 0;
+    if (count === 1) seconds = 30 * 60; // 30 minutos
+    else if (count === 2) seconds = 2 * 60 * 60; // 2 horas
+    else seconds = 24 * 60 * 60; // 24 horas para 3+
+
+    let endsAt: number | null = null;
+    if (seconds > 0) {
+      endsAt = Date.now() + seconds * 1000;
+      await this.redis.set(`cooldown:${oidUser}`, String(endsAt), { EX: seconds });
+    }
+
+    log('warn', `Cooldown por abandono aplicado para ${oidUser}: count=${count}, seconds=${seconds}`);
+    return { count, seconds, endsAt };
   }
 
   private async getMatchPlayerIds(matchId: string): Promise<number[]> {
