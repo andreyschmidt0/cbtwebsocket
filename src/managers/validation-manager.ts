@@ -385,6 +385,35 @@ export class ValidationManager {
   }
 
   /**
+   * Limpa chaves temporárias no Redis relacionadas a um match/lobby.
+   * Mantém apenas o que foi persistido em banco (o id do match).
+   */
+  private async clearRedisArtifacts(matchId: string): Promise<void> {
+    const keys = [
+      `match:${matchId}:queueSnapshot`,
+      `match:${matchId}:ready`,
+      `match:${matchId}:status`,
+      `match:${matchId}:room`,
+      `match:${matchId}:host`,
+      `match:${matchId}:hostPassword`,
+      `match:${matchId}:classes`,
+      `match:${matchId}:endReason`,
+      `room:${matchId}`,
+      `lobby:${matchId}:state`,
+      `lobby:${matchId}:vetos`,
+      `lobby:${matchId}:votes`,
+      `lobby:${matchId}:selectedMap`,
+      `lobby:temp:${matchId}`
+    ]
+    try {
+      await this.redis.del(keys)
+      log('debug', `🧹 Chaves Redis limpas para match ${matchId}: ${keys.join(', ')}`)
+    } catch (err) {
+      log('warn', `Falha ao limpar chaves Redis para match ${matchId}`, err)
+    }
+  }
+
+  /**
    * Processa um match individual
    */
   private async processMatch(
@@ -531,13 +560,14 @@ export class ValidationManager {
         }
       }
 
-      // Limpa dados temporários (somente o lobby:temp)
-      await this.redis.del(`lobby:temp:${matchId}`)
+      // Limpa dados temporários
+      await this.clearRedisArtifacts(matchId)
 
     } catch (error) {
       log('error', `❌ Erro ao processar match ${matchId}`, error)
     } finally {
       await this.clearMatchCaches(matchId)
+      await this.clearRedisArtifacts(matchId)
       // Remove da validação ativa em qualquer caso (sucesso ou falha)
       this.activeMatches.delete(matchId)
       await this.redisDel(`validation:${matchId}`)
@@ -875,7 +905,7 @@ export class ValidationManager {
       }
 
       // Limpa dados temporários
-      await this.redis.del(`lobby:temp:${matchId}`) // Este manager é dono desta chave
+      await this.clearRedisArtifacts(matchId)
 
     } catch (error) {
       log('error', `❌ Erro ao processar timeout do match ${matchId}`, error)
