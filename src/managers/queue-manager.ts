@@ -53,6 +53,10 @@ export class QueueManager {
     if (!player.queuedAt) {
       player.queuedAt = Date.now()
     }
+    // Normaliza dados de party
+    player.partyId = player.partyId || null
+    player.partyMembers = player.partyMembers || (player.partyId ? [player.oidUser] : undefined)
+    player.partySize = player.partySize || (player.partyMembers ? player.partyMembers.length : 1)
 
     // 3. Adicionar à fila (memória)
     this.queue.set(player.oidUser, player)
@@ -65,7 +69,10 @@ export class QueueManager {
         username: player.username,
         mmr: player.mmr,
         classes: player.classes,
-        queuedAt: player.queuedAt
+        queuedAt: player.queuedAt,
+        partyId: player.partyId,
+        partyMembers: player.partyMembers,
+        partySize: player.partySize
       }),
       { EX: 3600 }
     )
@@ -249,14 +256,24 @@ export class QueueManager {
         log('debug', `Expansao de janela para +/-${window} (espera ${(waitMs / 1000).toFixed(0)}s) para ${reference.username}`)
       }
 
+      // Filtra por MMR
       const mmrPool = players.filter(p => p.mmr >= mmrMin && p.mmr <= mmrMax)
       if (mmrPool.length < 10) continue
 
-      const picked = mmrPool.slice(0, Math.min(mmrPool.length, 25))
+      // Garante parties completas (no máximo 2 membros)
+      const partiesComplete = this.ensurePartyCompleteness(mmrPool)
+      if (partiesComplete.length < 10) continue
+
+      const picked = partiesComplete.slice(0, Math.min(partiesComplete.length, 25))
       const allowHardAutofill = waitMs >= 120000
       const rolePlayers = this.pickPlayersByRoleContract(picked, allowHardAutofill)
 
       if (rolePlayers) {
+        // Verifica se todas as parties estão completas no resultado
+        const hasBrokenParty = this.hasBrokenParty(rolePlayers)
+        if (hasBrokenParty) {
+          continue
+        }
         log('info', `Match encontrado! (10) MMR range: ${mmrMin}-${mmrMax} (papeis garantidos)`)
         return rolePlayers
       }
@@ -291,7 +308,10 @@ export class QueueManager {
         username: p.username,
         mmr: p.mmr,
         assignedRole: this.currentRoleAllocation?.get(p.oidUser),
-        wasAutofill: this.currentRoleAllocation ? this.wasAutofill(p, this.currentRoleAllocation.get(p.oidUser)) : false
+        wasAutofill: this.currentRoleAllocation ? this.wasAutofill(p, this.currentRoleAllocation.get(p.oidUser)) : false,
+        partyId: p.partyId,
+        partyMembers: p.partyMembers,
+        partySize: p.partySize
       }))
       await this.redis.set(`match:${matchId}:queueSnapshot`, JSON.stringify(snapshot), { EX: 7200 })
     } catch (err) {
@@ -413,18 +433,95 @@ export class QueueManager {
     const strict = this.buildStrictTeams(players)
     if (strict) {
       log('info', '✅ Times balanceados com regras completas de tier')
-      return this.randomizeTeamOrder(strict)
+      const randomized = this.randomizeTeamOrder(strict)
+      if (this.isPartySplit(randomized)) {
+        log('warn', '⚠️ Party dividida entre times no balanceamento estrito; descartando combinação')
+      } else {
+        return randomized
+      }
     }
 
     log('warn', '⚠️ Não foi possível balancear tiers respeitando todas as regras. Ativando fallback de autofill.')
     const autofillTeams = this.buildAutoFillTeams(players)
     if (autofillTeams) {
       log('info', '🛟 Autofill habilitado: usando tiers secundários/flex para completar os times')
-      return this.randomizeTeamOrder(autofillTeams)
+      const randomized = this.randomizeTeamOrder(autofillTeams)
+      if (this.isPartySplit(randomized)) {
+        log('warn', '⚠️ Party dividida entre times no autofill; descartando combinação')
+      } else {
+        return randomized
+      }
     }
 
     log('warn', '⚠️ Nem mesmo o autofill conseguiu montar os times.')
     return null
+  }
+
+  /**
+   * Filtra um pool para garantir parties completas (hoje: suporte a duplas)
+   */
+  private ensurePartyCompleteness(pool: QueuePlayer[]): QueuePlayer[] {
+    const byParty = new Map<string, QueuePlayer[]>()
+    const solos: QueuePlayer[] = []
+
+    for (const p of pool) {
+      if (p.partyId) {
+        const arr = byParty.get(p.partyId) || []
+        arr.push(p)
+        byParty.set(p.partyId, arr)
+      } else {
+        solos.push(p)
+      }
+    }
+
+    const complete: QueuePlayer[] = [...solos]
+    for (const arr of byParty.values()) {
+      const expected = arr[0]?.partySize || arr.length
+      if (arr.length === expected) {
+        complete.push(...arr)
+      }
+    }
+    return complete
+  }
+
+  /**
+   * Verifica se alguma party foi quebrada no resultado final
+   */
+  private hasBrokenParty(players: QueuePlayer[]): boolean {
+    const byParty = new Map<string, { count: number; expected: number }>()
+    for (const p of players) {
+      if (p.partyId) {
+        const entry = byParty.get(p.partyId) || { count: 0, expected: p.partySize || 1 }
+        entry.count += 1
+        byParty.set(p.partyId, entry)
+      }
+    }
+    for (const [_, info] of byParty.entries()) {
+      if (info.count !== info.expected) return true
+    }
+    return false
+  }
+
+  /**
+   * Verifica se alguma party foi dividida em times diferentes.
+   */
+  private isPartySplit(teams: { ALPHA: { player: QueuePlayer, role: TeamRole }[], BRAVO: { player: QueuePlayer, role: TeamRole }[] }): boolean {
+    const partyTeams = new Map<string, Set<'ALPHA' | 'BRAVO'>>()
+    const add = (partyId: string, team: 'ALPHA' | 'BRAVO') => {
+      const set = partyTeams.get(partyId) || new Set<'ALPHA' | 'BRAVO'>()
+      set.add(team)
+      partyTeams.set(partyId, set)
+    }
+    teams.ALPHA.forEach(p => {
+      if (p.player.partyId) add(p.player.partyId, 'ALPHA')
+    })
+    teams.BRAVO.forEach(p => {
+      if (p.player.partyId) add(p.player.partyId, 'BRAVO')
+    })
+    for (const set of partyTeams.values()) {
+      if (set.size > 1) return true
+    }
+    return false
   }
 
   /**

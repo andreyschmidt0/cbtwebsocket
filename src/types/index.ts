@@ -24,6 +24,9 @@ export interface QueuePlayer {
   };
   queuedAt?: number;
   joinedAt?: number;
+  partyId?: string | null;
+  partySize?: number;
+  partyMembers?: number[];
 }
 
 export interface MatchData {

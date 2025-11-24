@@ -1,4 +1,4 @@
-import { WebSocketServer, WebSocket } from 'ws';
+﻿import { WebSocketServer, WebSocket } from 'ws';
 import express from 'express';         // <-- ADICIONADO
 import { createServer, Server as HttpServer } from 'http';   // <-- ADICIONADO
 import cors from 'cors';             // <-- ADICIONADO
@@ -7,12 +7,14 @@ import { ReadyManager } from './managers/ready-manager';
 import { HOSTManager } from './managers/host-manager';
 import { ValidationManager } from './managers/validation-manager';
 import { LobbyManager } from './managers/lobby-manager';
+import { FriendManager } from './managers/friend-manager';
+import { PartyManager } from './managers/party-manager';
 import { QueuePlayer, ReadyPlayer } from './types';
 import { prismaRanked, prismaGame } from './database/prisma';
 import { log } from './utils/logger';
 import { getRedisClient } from './database/redis-client';
 import crypto from 'crypto';
-import { computeMatchmakingValue, formatTierLabel, RankTier } from './rank/rank-tiers';
+import { computeMatchmakingValue, formatTierLabel, getTierIndex, RankTier } from './rank/rank-tiers';
 
 // ... (Interfaces: AuthenticatedWebSocket, WSMessage, etc. - Sem mudanças) ...
 interface AuthenticatedWebSocket extends WebSocket {
@@ -20,6 +22,7 @@ interface AuthenticatedWebSocket extends WebSocket {
   username?: string;
   discordId?: string;
   isAlive?: boolean;
+  inviteFrom?: string | null;
 }
 
 interface WSMessage {
@@ -87,6 +90,8 @@ export class RankedWebSocketServer {
   private hostManager: HOSTManager;
   private validationManager: ValidationManager;
   private lobbyManager: LobbyManager;
+  private friendManager: FriendManager;
+  private partyManager: PartyManager;
 
   // Servidor HTTP e App Express
   private app: express.Express;         // <-- ADICIONADO
@@ -154,6 +159,8 @@ export class RankedWebSocketServer {
     this.readyManager = new ReadyManager();
     this.hostManager = new HOSTManager();
     this.lobbyManager = new LobbyManager();
+    this.friendManager = new FriendManager();
+    this.partyManager = new PartyManager();
     this.validationManager = new ValidationManager({
       onMatchCompleted: async (matchId, result) => {
         log('debug', `✅ Match ${matchId} validado! Vencedor: ${result.winner}`);
@@ -887,16 +894,54 @@ this.readyManager.onReadyFailed(async (
           await this.handleLobbyAcceptSwap(ws, payload)
           break
 		  
-		case 'LOBBY_ACCEPT_VOICE_TRANSFER':
-		  if (ws.oidUser && ws.discordId && payload.matchId) {
-			this.redis.publish("discord:actions", JSON.stringify({
-			  type: 'MOVE_PLAYER',
-			  oidUser: ws.oidUser,
-			  discordId: ws.discordId,
-			  matchId: payload.matchId
-			}));
-		  }
-		  break;
+        case 'LOBBY_ACCEPT_VOICE_TRANSFER':
+          if (ws.oidUser && ws.discordId && payload.matchId) {
+            this.redis.publish("discord:actions", JSON.stringify({
+              type: 'MOVE_PLAYER',
+              oidUser: ws.oidUser,
+              discordId: ws.discordId,
+              matchId: payload.matchId
+            }));
+          }
+          break;
+
+        case 'FRIEND_SEND':
+          await this.handleFriendSend(ws, payload);
+          break;
+        case 'FRIEND_ACCEPT':
+          await this.handleFriendAccept(ws, payload);
+          break;
+        case 'FRIEND_REJECT':
+          await this.handleFriendReject(ws, payload);
+          break;
+        case 'FRIEND_REMOVE':
+          await this.handleFriendRemove(ws, payload);
+          break;
+        case 'FRIEND_LIST':
+          await this.handleFriendList(ws);
+          break;
+        case 'FRIEND_PENDING':
+          await this.handleFriendPending(ws);
+          break;
+
+        case 'PARTY_CREATE':
+          await this.handlePartyCreate(ws);
+          break;
+        case 'PARTY_INVITE':
+          await this.handlePartyInvite(ws, payload);
+          break;
+        case 'PARTY_ACCEPT_INVITE':
+          await this.handlePartyAcceptInvite(ws, payload);
+          break;
+        case 'PARTY_LEAVE':
+          await this.handlePartyLeave(ws);
+          break;
+        case 'PARTY_KICK':
+          await this.handlePartyKick(ws, payload);
+          break;
+        case 'PARTY_TRANSFER_LEAD':
+          await this.handlePartyTransferLead(ws, payload);
+          break;
 
         case 'LOBBY_ABANDON':
           await this.handleLobbyAbandon(ws, payload);
@@ -987,6 +1032,19 @@ this.readyManager.onReadyFailed(async (
       payload: { oidUser, username: ws.username }
     })
 
+    // Reenvia estado de party (suporte a F5)
+    try {
+      const partyId = await this.partyManager.getPartyIdByPlayer(oidUser);
+      if (partyId) {
+        const party = await this.partyManager.getParty(partyId);
+        if (party) {
+          this.sendMessage(ws, { type: 'PARTY_UPDATED', payload: { party } });
+        }
+      }
+    } catch (err) {
+      log('warn', `Falha ao reemitir PARTY_UPDATED para ${oidUser}`, err);
+    }
+
     // Se o jogador tinha uma lobby ativa, reenvia os dados completos (suporte a F5)
     try {
       const activeLobbyId = await this.redis.get(`player:${oidUser}:activeLobby`);
@@ -1060,32 +1118,113 @@ this.readyManager.onReadyFailed(async (
         playerMMR = computeMatchmakingValue(playerRankTier, playerRankPoints)
       }
 
-      const playerData: QueuePlayer = {
-        oidUser: ws.oidUser,
-        username: ws.username || `Player${ws.oidUser}`,
-        mmr: playerMMR,
-        rankTier: playerRankTier,
-        rankPoints: playerRankPoints,
-        discordId: ws.discordId, // Passa discordId para validação anti-multi-accounting
-        classes: classesOverride || { primary: 'T3', secondary: 'SMG' },
-        queuedAt: queuedAtOverride,
-        joinedAt: Date.now(),
+      let partyId: string | null = null
+      let partyMembers: number[] | undefined = undefined
+      try {
+        const partyFromIndex = await this.partyManager.getPartyIdByPlayer(ws.oidUser)
+        if (partyFromIndex) {
+          const party = await this.partyManager.getParty(partyFromIndex)
+          if (party && party.members.includes(ws.oidUser)) {
+            partyId = party.id
+            partyMembers = party.members
+          }
+        }
+      } catch (err) {
+        log('warn', `Falha ao recuperar party para ${ws.oidUser}`, err)
       }
 
-      const validation = await this.queueManager.addToQueue(playerData)
+      const memberIds = partyMembers && partyMembers.length > 0 ? partyMembers : [ws.oidUser];
+      const queuedAtShared = queuedAtOverride || Date.now();
 
-      if (!validation.valid) {
-        if (requeueKey) {
-          await this.redis.expire(requeueKey, 600).catch(() => { })
+      // Valida party (tier/cooldown/fila) antes de adicionar
+      if (partyId && memberIds.length > 1) {
+        const partyCheck = await this.checkPartyEligibility(memberIds, partyId)
+        if (!partyCheck.ok) {
+          return this.sendMessage(ws, {
+            type: 'QUEUE_FAILED',
+            payload: {
+              reason: partyCheck.reason,
+              endsAt: partyCheck.endsAt,
+              offender: partyCheck.offender
+            }
+          })
         }
-        return this.sendMessage(ws, {
-          type: 'QUEUE_FAILED',
-          payload: {
-            reason: validation.reason,
-            endsAt: validation.endsAt,
-            until: validation.until
+      }
+
+      // Helper para obter stats de um jogador (mmr/tier/points)
+      const fetchPlayerStats = async (oid: number) => {
+        let rankTier: RankTier = 'BRONZE_3';
+        let rankPoints = 0;
+        let mmr = 0;
+        try {
+          const [row] = await prismaRanked.$queryRaw<{ rankTier: string | null; rankPoints: number | null; eloRating: number | null }[]>`
+            SELECT 
+              ISNULL(rankTier, 'BRONZE_3') as rankTier,
+              ISNULL(rankPoints, 0) as rankPoints,
+              ISNULL(eloRating, 0) as eloRating
+            FROM BST_RankedUserStats
+            WHERE oidUser = ${oid}
+          `;
+          if (row) {
+            rankTier = (row.rankTier as RankTier) || 'BRONZE_3';
+            rankPoints = Number(row.rankPoints ?? 0);
+            const storedRating = Number(row.eloRating ?? 0);
+            mmr = storedRating > 0
+              ? storedRating
+              : computeMatchmakingValue(rankTier, rankPoints);
+          } else {
+            mmr = computeMatchmakingValue(rankTier, rankPoints);
           }
-        })
+        } catch (mmrError) {
+          log('warn', `Falha ao buscar MMR para ${oid}`, mmrError);
+          mmr = computeMatchmakingValue(rankTier, rankPoints);
+        }
+        return { rankTier, rankPoints, mmr };
+      };
+
+      const addedMembers: number[] = [];
+
+      for (const memberId of memberIds) {
+        const { rankTier, rankPoints, mmr } = memberId === ws.oidUser
+          ? { rankTier: playerRankTier, rankPoints: playerRankPoints, mmr: playerMMR }
+          : await fetchPlayerStats(memberId);
+
+        const username = memberId === ws.oidUser
+          ? (ws.username || `Player${memberId}`)
+          : await this.getUsername(memberId);
+
+        const memberData: QueuePlayer = {
+          oidUser: memberId,
+          username,
+          mmr,
+          rankTier,
+          rankPoints,
+          discordId: memberId === ws.oidUser ? ws.discordId : undefined,
+          classes: memberId === ws.oidUser ? (classesOverride || { primary: 'T3', secondary: 'SMG' }) : { primary: 'T3', secondary: 'SMG' },
+          queuedAt: queuedAtShared,
+          joinedAt: Date.now(),
+          partyId,
+          partyMembers: memberIds,
+        };
+
+        const validation = await this.queueManager.addToQueue(memberData);
+        if (!validation.valid) {
+          for (const added of addedMembers) {
+            await this.queueManager.removeFromQueue(added).catch(() => {});
+          }
+          if (requeueKey) {
+            await this.redis.expire(requeueKey, 600).catch(() => { })
+          }
+          return this.sendMessage(ws, {
+            type: 'QUEUE_FAILED',
+            payload: {
+              reason: validation.reason,
+              endsAt: validation.endsAt,
+              until: validation.until
+            }
+          })
+        }
+        addedMembers.push(memberId);
       }
 
       if (requeueKey) {
@@ -1096,14 +1235,20 @@ this.readyManager.onReadyFailed(async (
 
       const queueSize = this.queueManager.getQueueSize()
 
-      this.sendMessage(ws, {
-        type: 'QUEUE_JOINED',
-        payload: {
-          queueSize,
-          estimatedWait: queueSize * 6, // ~6 segundos por jogador
-          queuedAt: playerData.queuedAt
+      // Notifica todos da party (ou só o próprio) que entraram na fila
+      for (const memberId of memberIds) {
+        const client = memberId === ws.oidUser ? ws : this.clients.get(memberId);
+        if (client && client.readyState === WebSocket.OPEN) {
+          this.sendMessage(client, {
+            type: 'QUEUE_JOINED',
+            payload: {
+              queueSize,
+              estimatedWait: queueSize * 6, // ~6 segundos por jogador
+              queuedAt: queuedAtShared
+            }
+          });
         }
-      })
+      }
 
       // O QueueManager já tem matchmaking automático interno (polling a cada 5s)
 
@@ -1117,17 +1262,31 @@ this.readyManager.onReadyFailed(async (
    * QUEUE_LEAVE - Jogador sai da fila
    */
   private async handleQueueLeave(ws: AuthenticatedWebSocket): Promise<void> {
-    // ... (Todo o seu método handleQueueLeave - sem mudanças) ...
     if (!ws.oidUser) return
 
-    await this.queueManager.removeFromQueue(ws.oidUser)
+    let memberIds: number[] = [ws.oidUser]
+    try {
+      const partyId = await this.partyManager.getPartyIdByPlayer(ws.oidUser)
+      if (partyId) {
+        const party = await this.partyManager.getParty(partyId)
+        if (party?.members?.length) {
+          memberIds = party.members
+        }
+      }
+    } catch {}
 
-    log('debug', `❌ ${ws.username} saiu da fila`)
+    for (const memberId of memberIds) {
+      await this.queueManager.removeFromQueue(memberId)
+      const client = memberId === ws.oidUser ? ws : this.clients.get(memberId)
+      if (client && client.readyState === WebSocket.OPEN) {
+        this.sendMessage(client, {
+          type: 'QUEUE_LEFT',
+          payload: {}
+        })
+      }
+    }
 
-    this.sendMessage(ws, {
-      type: 'QUEUE_LEFT',
-      payload: {}
-    })
+    log('debug', `❌ ${ws.username} (party ${memberIds.join(',')}) saiu da fila`)
   }
 
   /**
@@ -1273,6 +1432,435 @@ this.readyManager.onReadyFailed(async (
     } catch (e) {
       log('warn', 'Falha ao aplicar cooldown de decline', e)
     }
+  }
+
+  /**
+   * FRIEND_SEND - Envia solicitação de amizade
+   */
+  private async handleFriendSend(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const targetOidUser = await this.resolveTargetUserId(payload);
+    if (!targetOidUser) {
+      return this.sendError(ws, 'TARGET_REQUIRED');
+    }
+    const result = await this.friendManager.sendRequest(ws.oidUser, targetOidUser);
+    if (!result.ok) {
+      return this.sendMessage(ws, { type: 'FRIEND_ERROR', payload: { reason: result.reason } });
+    }
+
+    this.sendMessage(ws, { type: 'FRIEND_REQUEST_SENT', payload: { targetOidUser } });
+
+    const targetClient = this.clients.get(targetOidUser);
+    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+      const requesterName = ws.username || (await this.getUsername(ws.oidUser));
+      this.sendMessage(targetClient, {
+        type: 'FRIEND_REQUEST',
+        payload: { requesterOidUser: ws.oidUser, requesterName }
+      });
+    }
+  }
+
+  private async handleFriendAccept(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const requesterOidUser = Number(payload?.requesterOidUser);
+    if (!requesterOidUser) {
+      return this.sendError(ws, 'REQUESTER_REQUIRED');
+    }
+    const result = await this.friendManager.accept(requesterOidUser, ws.oidUser);
+    if (!result.ok) {
+      return this.sendMessage(ws, { type: 'FRIEND_ERROR', payload: { reason: result.reason } });
+    }
+
+    const selfName = ws.username || (await this.getUsername(ws.oidUser));
+    const requesterName = await this.getUsername(requesterOidUser);
+
+    this.sendMessage(ws, {
+      type: 'FRIEND_ACCEPTED',
+      payload: { oidUser: requesterOidUser, username: requesterName }
+    });
+
+    const requesterClient = this.clients.get(requesterOidUser);
+    if (requesterClient && requesterClient.readyState === WebSocket.OPEN) {
+      this.sendMessage(requesterClient, {
+        type: 'FRIEND_ACCEPTED',
+        payload: { oidUser: ws.oidUser, username: selfName }
+      });
+    }
+  }
+
+  private async handleFriendReject(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const requesterOidUser = Number(payload?.requesterOidUser);
+    if (!requesterOidUser) {
+      return this.sendError(ws, 'REQUESTER_REQUIRED');
+    }
+    const result = await this.friendManager.reject(requesterOidUser, ws.oidUser);
+    if (!result.ok) {
+      return this.sendMessage(ws, { type: 'FRIEND_ERROR', payload: { reason: result.reason } });
+    }
+    this.sendMessage(ws, { type: 'FRIEND_REJECTED', payload: { requesterOidUser } });
+  }
+
+  private async handleFriendRemove(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const targetOidUser = await this.resolveTargetUserId(payload);
+    if (!targetOidUser) {
+      return this.sendError(ws, 'TARGET_REQUIRED');
+    }
+    const result = await this.friendManager.remove(ws.oidUser, targetOidUser);
+    if (!result.ok) {
+      return this.sendMessage(ws, { type: 'FRIEND_ERROR', payload: { reason: result.reason } });
+    }
+    this.sendMessage(ws, { type: 'FRIEND_REMOVED', payload: { oidUser: targetOidUser } });
+    const targetClient = this.clients.get(targetOidUser);
+    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+      this.sendMessage(targetClient, { type: 'FRIEND_REMOVED', payload: { oidUser: ws.oidUser } });
+    }
+  }
+
+  private async handleFriendList(ws: AuthenticatedWebSocket): Promise<void> {
+    if (!ws.oidUser) return;
+    const friends = await this.friendManager.listFriends(ws.oidUser);
+    this.sendMessage(ws, { type: 'FRIEND_LIST', payload: { friends } });
+  }
+
+  private async handleFriendPending(ws: AuthenticatedWebSocket): Promise<void> {
+    if (!ws.oidUser) return;
+    const pending = await this.friendManager.listPending(ws.oidUser);
+    this.sendMessage(ws, { type: 'FRIEND_PENDING', payload: { pending } });
+  }
+
+  private async getUsername(oidUser: number): Promise<string> {
+    const client = this.clients.get(oidUser);
+    if (client?.username) return client.username;
+    try {
+      const row = await prismaGame.$queryRaw<any[]>`
+        SELECT TOP 1 NickName FROM CBT_User WHERE oiduser = ${oidUser}
+      `;
+      if (row && row[0]?.NickName) return row[0].NickName;
+    } catch {}
+    return `Player${oidUser}`;
+  }
+
+  private async resolveTargetUserId(payload: any): Promise<number | null> {
+    const direct = Number(payload?.targetOidUser);
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    const targetLogin = (payload?.targetLogin as string | undefined)?.trim();
+    if (!targetLogin) return null;
+    try {
+      const rows = await prismaGame.$queryRaw<any[]>`
+        SELECT TOP 1 oiduser FROM CBT_User WHERE NickName = ${targetLogin}
+      `;
+      if (rows && rows[0]?.oiduser) {
+        return Number(rows[0].oiduser);
+      }
+    } catch (err) {
+      log('warn', `Falha ao resolver targetLogin ${targetLogin}`, err);
+    }
+    return null;
+  }
+
+  // =========================
+  // PARTY HANDLERS
+  // =========================
+
+  private async handlePartyCreate(ws: AuthenticatedWebSocket): Promise<void> {
+    if (!ws.oidUser) return;
+    const existingPartyId = await this.partyManager.getPartyIdByPlayer(ws.oidUser);
+    if (existingPartyId) {
+      const party = await this.partyManager.getParty(existingPartyId);
+      if (party) {
+        this.sendMessage(ws, { type: 'PARTY_UPDATED', payload: { party } });
+        return;
+      }
+    }
+    const party = await this.partyManager.createParty(ws.oidUser);
+    this.sendMessage(ws, { type: 'PARTY_UPDATED', payload: { party } });
+  }
+
+  private async handlePartyInvite(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const targetOidUser = Number(payload?.targetOidUser);
+    if (!targetOidUser) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'TARGET_REQUIRED' } });
+    }
+    const deletePairKey = async (id1: number, id2: number) => {
+      try {
+        const a = Math.min(id1, id2);
+        const b = Math.max(id1, id2);
+        await this.redis.del(`party:invitepair:${a}:${b}`);
+      } catch (err) {
+        log('warn', `Falha ao limpar chave de convite (${id1}, ${id2})`, err);
+      }
+    };
+    const partyId = await this.partyManager.getPartyIdByPlayer(ws.oidUser);
+    if (!partyId) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'NO_PARTY' } });
+    }
+    const party = await this.partyManager.getParty(partyId);
+    if (!party || party.leaderId !== ws.oidUser) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'NOT_LEADER' } });
+    }
+    if (party.members.length >= 2) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'PARTY_FULL' } });
+    }
+
+    // Evita convites duplicados/cruzados entre o mesmo par de jogadores
+    const requesterId = ws.oidUser as number;
+    const cleanupInvitePair = async () => deletePairKey(requesterId, targetOidUser);
+    try {
+      const a = Math.min(requesterId, targetOidUser);
+      const b = Math.max(requesterId, targetOidUser);
+      const pairKey = `party:invitepair:${a}:${b}`;
+      const exists = await this.redis.get(pairKey);
+      if (exists) {
+        return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'INVITE_ALREADY_SENT' } });
+      }
+      await this.redis.set(pairKey, '1', { EX: 300 }); // 5 min
+    } catch (err) {
+      log('warn', `Falha ao registrar par de convite (${ws.oidUser}, ${targetOidUser})`, err);
+    }
+
+    const eligibility = await this.checkPartyInviteConstraints(ws.oidUser, targetOidUser, party.id);
+    if (!eligibility.ok) {
+      await cleanupInvitePair();
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: eligibility.reason, endsAt: eligibility.endsAt, offender: eligibility.offender } });
+    }
+    const targetClient = this.clients.get(targetOidUser);
+    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+      const inviterName = ws.username || (await this.getUsername(ws.oidUser));
+      this.sendMessage(targetClient, {
+        type: 'PARTY_INVITE',
+        payload: { partyId, inviterOidUser: ws.oidUser, inviterName }
+      });
+      this.sendMessage(ws, { type: 'PARTY_INVITE_SENT', payload: { targetOidUser } });
+    } else {
+      await cleanupInvitePair();
+      this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'TARGET_OFFLINE' } });
+    }
+  }
+
+  private async handlePartyAcceptInvite(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const partyId = payload?.partyId as string;
+    if (!partyId) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'PARTY_ID_REQUIRED' } });
+    }
+
+    // Se já estiver em outra party, remove antes de aceitar o convite atual
+    const existing = await this.partyManager.getPartyIdByPlayer(ws.oidUser);
+    if (existing && existing !== partyId) {
+      const oldParty = await this.partyManager.removeMember(existing, ws.oidUser);
+      this.sendMessage(ws, { type: 'PARTY_LEFT', payload: { partyId: existing } });
+      if (oldParty) {
+        this.broadcastPartyUpdate(oldParty);
+      }
+    } else if (existing === partyId) {
+      // Já está na mesma party - apenas envia estado
+      const current = await this.partyManager.getParty(partyId);
+      if (current) {
+        this.sendMessage(ws, { type: 'PARTY_UPDATED', payload: { party: current } });
+      }
+      return;
+    }
+
+    // Evita convites cruzados duplicados: se o alvo já tem convite pendente para o líder, considere aceitar direto
+    if (ws.inviteFrom === partyId) {
+      // noop; segue fluxo normal
+    }
+
+    const party = await this.partyManager.addMember(partyId, ws.oidUser);
+    if (!party) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'PARTY_NOT_FOUND' } });
+    }
+    if (party.members.length > 2) {
+      await this.partyManager.removeMember(partyId, ws.oidUser);
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'PARTY_FULL' } });
+    }
+    const eligibility = await this.checkPartyInviteConstraints(party.leaderId, ws.oidUser, partyId);
+    if (!eligibility.ok) {
+      await this.partyManager.removeMember(partyId, ws.oidUser);
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: eligibility.reason, endsAt: eligibility.endsAt, offender: eligibility.offender } });
+    }
+    // Limpa chave de convite após aceitar
+    try {
+      const a = Math.min(party.leaderId, ws.oidUser);
+      const b = Math.max(party.leaderId, ws.oidUser);
+      await this.redis.del(`party:invitepair:${a}:${b}`);
+    } catch (err) {
+      log('warn', `Falha ao limpar par de convite ao aceitar (${party.leaderId}, ${ws.oidUser})`, err);
+    }
+    this.broadcastPartyUpdate(party);
+  }
+
+  private async handlePartyLeave(ws: AuthenticatedWebSocket): Promise<void> {
+    if (!ws.oidUser) return;
+    const partyId = await this.partyManager.getPartyIdByPlayer(ws.oidUser);
+    if (!partyId) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'NO_PARTY' } });
+    }
+    const party = await this.partyManager.removeMember(partyId, ws.oidUser);
+    if (!party) {
+      // Party deletada
+      this.sendMessage(ws, { type: 'PARTY_LEFT', payload: { partyId } });
+      return;
+    }
+    this.sendMessage(ws, { type: 'PARTY_LEFT', payload: { partyId } });
+    this.broadcastPartyUpdate(party);
+  }
+
+  private async handlePartyKick(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const targetOidUser = Number(payload?.targetOidUser);
+    if (!targetOidUser) return;
+    const partyId = await this.partyManager.getPartyIdByPlayer(ws.oidUser);
+    if (!partyId) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'NO_PARTY' } });
+    }
+    const party = await this.partyManager.getParty(partyId);
+    if (!party || party.leaderId !== ws.oidUser) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'NOT_LEADER' } });
+    }
+    const updated = await this.partyManager.removeMember(partyId, targetOidUser);
+    try {
+      const a = Math.min(ws.oidUser, targetOidUser);
+      const b = Math.max(ws.oidUser, targetOidUser);
+      await this.redis.del(`party:invitepair:${a}:${b}`);
+    } catch (err) {
+      log('warn', `Falha ao limpar par de convite ao kick (${ws.oidUser}, ${targetOidUser})`, err);
+    }
+    this.sendMessage(ws, { type: 'PARTY_KICKED', payload: { oidUser: targetOidUser } });
+    const targetClient = this.clients.get(targetOidUser);
+    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+      this.sendMessage(targetClient, { type: 'PARTY_KICKED', payload: { oidUser: targetOidUser } });
+    }
+    if (updated) {
+      this.broadcastPartyUpdate(updated);
+    }
+  }
+
+  private async handlePartyTransferLead(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const targetOidUser = Number(payload?.targetOidUser);
+    if (!targetOidUser) return;
+    const partyId = await this.partyManager.getPartyIdByPlayer(ws.oidUser);
+    if (!partyId) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'NO_PARTY' } });
+    }
+    const party = await this.partyManager.getParty(partyId);
+    if (!party || party.leaderId !== ws.oidUser) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'NOT_LEADER' } });
+    }
+    const updated = await this.partyManager.transferLead(partyId, targetOidUser);
+    if (!updated) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'TRANSFER_FAILED' } });
+    }
+    this.broadcastPartyUpdate(updated);
+  }
+
+  private broadcastPartyUpdate(party: { id: string; members: number[]; leaderId: number }): void {
+    for (const oid of party.members) {
+      const client = this.clients.get(oid);
+      if (client && client.readyState === WebSocket.OPEN) {
+        this.sendMessage(client, { type: 'PARTY_UPDATED', payload: { party } });
+      }
+    }
+  }
+
+  /**
+   * Verifica se todos os membros da party podem entrar na fila
+   */
+  private async checkPartyEligibility(members: number[], partyId: string): Promise<{ ok: boolean; reason?: string; offender?: number; endsAt?: number }> {
+    if (!members || members.length === 0) return { ok: true }
+
+    // 1) Checa cooldown
+    for (const oid of members) {
+      try {
+        const cooldownRaw = await this.redis.get(`cooldown:${oid}`)
+        if (cooldownRaw) {
+          const endsAt = parseInt(cooldownRaw, 10)
+          if (!Number.isNaN(endsAt) && endsAt > Date.now()) {
+            return { ok: false, reason: 'PARTY_MEMBER_COOLDOWN', offender: oid, endsAt }
+          }
+        }
+      } catch {}
+    }
+
+    // 2) Checa se algum membro já está na fila
+    for (const oid of members) {
+      if (this.queueManager.isInQueue(oid)) {
+        return { ok: false, reason: 'PARTY_MEMBER_IN_QUEUE', offender: oid }
+      }
+    }
+
+    // 3) Checa distância de tier (máximo 2 tiers)
+    try {
+      const ranks = await prismaRanked.$queryRawUnsafe<{ oidUser: number; rankTier: string | null; rankPoints: number | null }[]>(
+        `SELECT oidUser, ISNULL(rankTier, 'BRONZE_3') as rankTier, ISNULL(rankPoints, 0) as rankPoints
+         FROM BST_RankedUserStats
+         WHERE oidUser IN (${members.join(',')})`
+      );
+      const tierById = new Map<number, RankTier>()
+      ranks.forEach(r => tierById.set(r.oidUser, (r.rankTier as RankTier) || 'BRONZE_3'))
+      // fallback se não vier do banco
+      members.forEach(id => {
+        if (!tierById.has(id)) tierById.set(id, 'BRONZE_3')
+      })
+
+      const tiers = Array.from(tierById.values())
+      const indices = tiers.map(getTierIndex)
+      const maxDiff = Math.max(...indices) - Math.min(...indices)
+      if (maxDiff > 2) {
+        return { ok: false, reason: 'PARTY_TIER_MISMATCH' }
+      }
+    } catch (err) {
+      log('warn', `Falha ao validar tiers da party ${partyId}`, err)
+    }
+
+    return { ok: true }
+  }
+
+  /**
+   * Valida convite/entrada na party (cooldown, fila, tier distante)
+   */
+  private async checkPartyInviteConstraints(inviterOid: number, targetOid: number, partyId: string): Promise<{ ok: boolean; reason?: string; offender?: number; endsAt?: number }> {
+    // 1) cooldown no alvo
+    try {
+      const cooldownRaw = await this.redis.get(`cooldown:${targetOid}`)
+      if (cooldownRaw) {
+        const endsAt = parseInt(cooldownRaw, 10)
+        if (!Number.isNaN(endsAt) && endsAt > Date.now()) {
+          return { ok: false, reason: 'PARTY_MEMBER_COOLDOWN', offender: targetOid, endsAt }
+        }
+      }
+    } catch {}
+
+    // 2) alvo já na fila
+    if (this.queueManager.isInQueue(targetOid)) {
+      return { ok: false, reason: 'PARTY_MEMBER_IN_QUEUE', offender: targetOid }
+    }
+
+    // 3) distância de tier (max 2)
+    try {
+      const rows = await prismaRanked.$queryRawUnsafe<{ oidUser: number; rankTier: string | null; rankPoints: number | null }[]>(
+        `SELECT oidUser, ISNULL(rankTier, 'BRONZE_3') as rankTier, ISNULL(rankPoints, 0) as rankPoints
+         FROM BST_RankedUserStats
+         WHERE oidUser IN (${[inviterOid, targetOid].join(',')})`
+      );
+      const tierById = new Map<number, RankTier>()
+      rows.forEach(r => tierById.set(r.oidUser, (r.rankTier as RankTier) || 'BRONZE_3'))
+      if (!tierById.has(inviterOid)) tierById.set(inviterOid, 'BRONZE_3')
+      if (!tierById.has(targetOid)) tierById.set(targetOid, 'BRONZE_3')
+      const indices = [inviterOid, targetOid].map(id => getTierIndex(tierById.get(id) as RankTier))
+      const diff = Math.max(...indices) - Math.min(...indices)
+      if (diff > 2) {
+        return { ok: false, reason: 'PARTY_TIER_MISMATCH' }
+      }
+    } catch (err) {
+      log('warn', `Falha ao validar tiers para party ${partyId}`, err)
+    }
+
+    return { ok: true }
   }
 
   /**

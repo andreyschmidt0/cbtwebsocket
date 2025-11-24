@@ -16,7 +16,8 @@ function gerarClasse(i) {
     { primary: 'T3', secondary: 'SMG' },    // Bot 5
     { primary: 'T3', secondary: 'T4' },    // Bot 6
     { primary: 'T4', secondary: 'T3' },    // Bot 7
-    { primary: 'T4', secondary: 'SMG' },    // Bot 8
+    { primary: 'T4', secondary: 'SMG' },
+    { primary: 'SNIPER', secondary: 'SMG' }    // Bot 8
   ];
 
   // Retorna o loadout específico para este bot (i-1 pois o loop começa em 1)
@@ -24,7 +25,7 @@ function gerarClasse(i) {
 }
 
 // Loop alterado para 8 jogadores
-for (let i = 1; i <= 8; i++) {
+for (let i = 1; i <= 9; i++) {
   const ws = new WebSocket(WS_URL);
   const oidUser = 1100 + i;
   const username = `BotPlayer${i}`;
