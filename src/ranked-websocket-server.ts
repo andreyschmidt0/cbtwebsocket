@@ -933,6 +933,9 @@ this.readyManager.onReadyFailed(async (
         case 'PARTY_ACCEPT_INVITE':
           await this.handlePartyAcceptInvite(ws, payload);
           break;
+        case 'PARTY_DECLINE_INVITE':
+          await this.handlePartyDeclineInvite(ws, payload);
+          break;
         case 'PARTY_LEAVE':
           await this.handlePartyLeave(ws);
           break;
@@ -964,6 +967,13 @@ this.readyManager.onReadyFailed(async (
     // ... (Todo o seu método handleAuth - sem mudanças) ...
     const { oidUser, token, username, discordId } = payload
 
+    // Debug: log origem e dados do AUTH recebido
+    const incomingSocket: any = (ws as any)._socket;
+    log(
+      'debug',
+      `[AUTH] received oidUser=${oidUser} discordId=${discordId ?? 'n/a'} remote=${incomingSocket?.remoteAddress ?? 'unknown'}:${incomingSocket?.remotePort ?? 'n/a'}`
+    )
+
     if (!oidUser || !token) {
       this.sendMessage(ws, {
         type: 'AUTH_FAILED',
@@ -975,6 +985,8 @@ this.readyManager.onReadyFailed(async (
     // 🔐 PROTEÇÃO 1: Verifica se já existe uma conexão ativa com o mesmo oidUser
     const existingConnection = this.clients.get(oidUser)
     if (existingConnection && existingConnection.readyState === WebSocket.OPEN) {
+      const existingSocket: any = (existingConnection as any)._socket;
+      log('warn', `[AUTH] Duplicate connection for oidUser=${oidUser} existingRemote=${existingSocket?.remoteAddress ?? 'unknown'}:${existingSocket?.remotePort ?? 'n/a'} existingState=${existingConnection.readyState} newRemote=${incomingSocket?.remoteAddress ?? 'unknown'}:${incomingSocket?.remotePort ?? 'n/a'}`)
       log('warn', `⚠️ Tentativa de conexão duplicada: ${oidUser} já está conectado`)
       this.sendMessage(ws, {
         type: 'AUTH_FAILED',
@@ -1024,6 +1036,7 @@ this.readyManager.onReadyFailed(async (
     }
 
     this.clients.set(oidUser, ws)
+    log('debug', `[AUTH] Registered client oidUser=${oidUser}. Connected count=${this.clients.size}`)
 
     log('debug', `✅ ${ws.username} (${oidUser}) autenticado${normalizedDiscordId ? ` [Discord: ${normalizedDiscordId}]` : ''}`)
 
@@ -1693,12 +1706,42 @@ this.readyManager.onReadyFailed(async (
     this.broadcastPartyUpdate(party);
   }
 
+  private async handlePartyDeclineInvite(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const inviterOidUser = Number(payload?.inviterOidUser);
+    if (!inviterOidUser) {
+      return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'INVITER_REQUIRED' } });
+    }
+
+    // Limpa o par de convite para permitir reenvio imediato
+    try {
+      const a = Math.min(inviterOidUser, ws.oidUser);
+      const b = Math.max(inviterOidUser, ws.oidUser);
+      await this.redis.del(`party:invitepair:${a}:${b}`);
+    } catch (err) {
+      log('warn', `Falha ao limpar par de convite ao recusar (${inviterOidUser}, ${ws.oidUser})`, err);
+    }
+
+    // Notifica o líder que a pessoa recusou (se estiver online)
+    const inviterClient = this.clients.get(inviterOidUser);
+    if (inviterClient && inviterClient.readyState === WebSocket.OPEN) {
+      this.sendMessage(inviterClient, {
+        type: 'PARTY_INVITE_DECLINED',
+        payload: { targetOidUser: ws.oidUser }
+      });
+    }
+  }
+
   private async handlePartyLeave(ws: AuthenticatedWebSocket): Promise<void> {
     if (!ws.oidUser) return;
     const partyId = await this.partyManager.getPartyIdByPlayer(ws.oidUser);
     if (!partyId) {
       return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'NO_PARTY' } });
     }
+
+    // Limpa convites pendentes enviados por este jogador (evita bloquear reenvio)
+    await this.clearPartyInvitesForUser(ws.oidUser);
+
     const party = await this.partyManager.removeMember(partyId, ws.oidUser);
     if (!party) {
       // Party deletada
@@ -1756,6 +1799,27 @@ this.readyManager.onReadyFailed(async (
       return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'TRANSFER_FAILED' } });
     }
     this.broadcastPartyUpdate(updated);
+  }
+
+  /**
+   * Remove todas as chaves de convite de party envolvendo o usuário.
+   */
+  private async clearPartyInvitesForUser(userId: number): Promise<void> {
+    try {
+      for await (const key of this.redis.scanIterator({ MATCH: 'party:invitepair:*', COUNT: 100 })) {
+        const parts = String(key).split(':');
+        const ids = parts.slice(-2).map((p) => Number(p));
+        if (ids.some((id) => id === userId)) {
+          try {
+            await this.redis.del(String(key));
+          } catch (err) {
+            log('warn', `Falha ao remover chave de convite ${key} para usuário ${userId}`, err);
+          }
+        }
+      }
+    } catch (err) {
+      log('warn', `Falha ao varrer convites pendentes para ${userId}`, err);
+    }
   }
 
   private broadcastPartyUpdate(party: { id: string; members: number[]; leaderId: number }): void {
@@ -2445,6 +2509,11 @@ private async validateAuthToken(params: TokenValidationParams): Promise<TokenVal
           log('warn', `Falha ao abortar seleção de HOST ${hostMatchId} após desconexão`, error)
         })
       }
+
+      // Limpa convites de party associados (caso fosse líder ou remetente de convites)
+      this.clearPartyInvitesForUser(ws.oidUser).catch((err) => {
+        log('warn', `Falha ao limpar convites de party na desconexão (${ws.oidUser})`, err);
+      });
 
       this.clients.delete(ws.oidUser)
     }
