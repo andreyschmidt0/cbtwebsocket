@@ -956,7 +956,13 @@ this.readyManager.onReadyFailed(async (
       }
     } catch (error) {
       log('error', '❌ Erro ao processar mensagem', error)
-      this.sendError(ws, 'Erro ao processar mensagem')
+      this.sendMessage(ws, {
+        type: 'ERROR',
+        payload: {
+          reason: 'SERVICE_UNAVAILABLE',
+          message: 'Servidor indisponível. Tente novamente em instantes.'
+        }
+      })
     }
   }
 
@@ -1663,10 +1669,19 @@ this.readyManager.onReadyFailed(async (
     // Se já estiver em outra party, remove antes de aceitar o convite atual
     const existing = await this.partyManager.getPartyIdByPlayer(ws.oidUser);
     if (existing && existing !== partyId) {
-      const oldParty = await this.partyManager.removeMember(existing, ws.oidUser);
-      this.sendMessage(ws, { type: 'PARTY_LEFT', payload: { partyId: existing } });
-      if (oldParty) {
-        this.broadcastPartyUpdate(oldParty);
+      // Se o jogador era líder da party antiga, desfaça a party inteira
+      const oldPartyState = await this.partyManager.getParty(existing);
+      if (oldPartyState && oldPartyState.leaderId === ws.oidUser) {
+        for (const memberId of oldPartyState.members) {
+          this.sendToPlayer(memberId, { type: 'PARTY_LEFT', payload: { partyId: existing } });
+        }
+        await this.partyManager.deleteParty(existing);
+      } else {
+        const oldParty = await this.partyManager.removeMember(existing, ws.oidUser);
+        this.sendMessage(ws, { type: 'PARTY_LEFT', payload: { partyId: existing } });
+        if (oldParty) {
+          this.broadcastPartyUpdate(oldParty);
+        }
       }
     } else if (existing === partyId) {
       // Já está na mesma party - apenas envia estado
