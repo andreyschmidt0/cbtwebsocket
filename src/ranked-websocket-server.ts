@@ -258,6 +258,13 @@ export class RankedWebSocketServer {
             }
           }
         );
+
+        // Limpa lobby e chaves player:{oid}:activeLobby ap�s a partida encerrar
+        try {
+          await this.lobbyManager.removeLobby(matchId);
+        } catch (err) {
+          log('warn', `Falha ao limpar lobby ${matchId} ap�s MATCH_ENDED`, err);
+        }
       },
       onMatchTimeout: async (matchId) => {
         log('warn', `⏰ Match ${matchId} timeout - sem logs suficientes`);
