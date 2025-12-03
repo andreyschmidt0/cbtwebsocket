@@ -560,6 +560,7 @@ export class QueueManager {
 
     const sortedPlayers = [...players].sort((a, b) => (a.queuedAt || 0) - (b.queuedAt || 0))
     const usedPlayer = new Set<number>()
+    const partyTeams = new Map<string, { team: 'ALPHA' | 'BRAVO'; count: number }>()
     
     // Rastreia as *classes primárias* (ou SNIPER sec) já usadas em cada time
     const usedClassesAlpha = new Set<WeaponTier | 'SNIPER'>()
@@ -625,6 +626,14 @@ export class QueueManager {
 
       for (const candidate of candidates) {
         const { player, primaryClass, priority } = candidate
+
+        // Respeita party: se outro membro ja esta alocado no time oposto, ignora
+        if (player.partyId) {
+          const entry = partyTeams.get(player.partyId)
+          if (entry && entry.team !== slot.team) {
+            continue
+          }
+        }
         
         // Define a classe que será "gasta"
         let classToOccupy: WeaponTier | 'SNIPER' = primaryClass
@@ -636,6 +645,14 @@ export class QueueManager {
 
         usedPlayer.add(player.oidUser)
         usedClasses.add(classToOccupy) // Marca a classe como usada *neste time*
+        if (player.partyId) {
+          const entry = partyTeams.get(player.partyId)
+          if (entry) {
+            entry.count += 1
+          } else {
+            partyTeams.set(player.partyId, { team: slot.team, count: 1 })
+          }
+        }
 
         if (slot.team === 'ALPHA') {
           alpha.push({ player: candidate.player, role: slot.role }) //
@@ -649,6 +666,15 @@ export class QueueManager {
 
         usedClasses.delete(classToOccupy) // Libera a classe (backtracking)
         usedPlayer.delete(player.oidUser)
+        if (player.partyId) {
+          const entry = partyTeams.get(player.partyId)
+          if (entry) {
+            entry.count -= 1
+            if (entry.count <= 0) {
+              partyTeams.delete(player.partyId)
+            }
+          }
+        }
       }
 
       return false
@@ -679,6 +705,7 @@ export class QueueManager {
 
     const sortedPlayers = [...players].sort((a, b) => (a.queuedAt || 0) - (b.queuedAt || 0))
     const usedPlayer = new Set<number>()
+    const partyTeams = new Map<string, { team: 'ALPHA' | 'BRAVO'; count: number }>()
     const alpha: { player: QueuePlayer, role: TeamRole }[] = []
     const bravo: { player: QueuePlayer, role: TeamRole }[] = []
     let best: TeamAssignment | null = null
@@ -713,17 +740,45 @@ export class QueueManager {
       }
 
       for (const candidate of candidates) {
-        usedPlayer.add(candidate.player.oidUser)
+        const player = candidate.player
+
+        // Respeita party: se outro membro j� est� em outro time, ignora
+        if (player.partyId) {
+          const entry = partyTeams.get(player.partyId)
+          if (entry && entry.team !== slot.team) {
+            continue
+          }
+        }
+
+        usedPlayer.add(player.oidUser)
+        if (player.partyId) {
+          const entry = partyTeams.get(player.partyId)
+          if (entry) {
+            entry.count += 1
+          } else {
+            partyTeams.set(player.partyId, { team: slot.team, count: 1 })
+          }
+        }
+
         if (slot.team === 'ALPHA') {
           alpha.push({ player: candidate.player, role: slot.role })
-          if (tryAssign(slotIndex + 1, alphaMMR + candidate.player.mmr, bravoMMR)) return true
+          if (tryAssign(slotIndex + 1, alphaMMR + player.mmr, bravoMMR)) return true
           alpha.pop()
         } else {
           bravo.push({ player: candidate.player, role: slot.role })
-          if (tryAssign(slotIndex + 1, alphaMMR, bravoMMR + candidate.player.mmr)) return true
+          if (tryAssign(slotIndex + 1, alphaMMR, bravoMMR + player.mmr)) return true
           bravo.pop()
         }
-        usedPlayer.delete(candidate.player.oidUser)
+        usedPlayer.delete(player.oidUser)
+        if (player.partyId) {
+          const entry = partyTeams.get(player.partyId)
+          if (entry) {
+            entry.count -= 1
+            if (entry.count <= 0) {
+              partyTeams.delete(player.partyId)
+            }
+          }
+        }
       }
 
       return false
