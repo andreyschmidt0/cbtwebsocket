@@ -1,4 +1,4 @@
-import { getRedisClient } from '../database/redis-client'
+﻿import { getRedisClient } from '../database/redis-client'
 import { log } from '../utils/logger'
 import { prismaGame } from '../database/prisma'
 
@@ -37,19 +37,19 @@ interface LobbyState {
   teams: Team
   mapVotes: Map<number, string> // oidUser -> mapId (DEPRECATED - usar veto system)
   vetoedMaps: string[] // IDs dos mapas vetados
-  vetoHistory: VetoHistoryItem[] // Histórico de vetos
-  currentTurn: 'ALPHA' | 'BRAVO' | null // De quem é a vez de vetar
+  vetoHistory: VetoHistoryItem[] // HistÃ³rico de vetos
+  currentTurn: 'ALPHA' | 'BRAVO' | null // De quem Ã© a vez de vetar
   vetoRound: number // Rodada atual do veto (0-5, total 6 vetos = 3 por time)
   timeRemaining: number // Tempo restante em segundos para o veto atual
   selectedMap: string | null
   chatMessages: Record<'ALPHA' | 'BRAVO', ChatMessage[]>
   generalChatMessages: ChatMessage[]
-  status: 'waiting' | 'veto-phase' | 'map-selected' | 'ready'
+  status: 'waiting' | 'setup-phase' | 'veto-phase' | 'map-selected' | 'ready'
 }
 
 
 /**
- * LobbyManager - Gerencia estado das lobbies após o ready check
+ * LobbyManager - Gerencia estado das lobbies apÃ³s o ready check
  */
 export class LobbyManager {
   private lobbies: Map<string, LobbyState> = new Map()
@@ -65,15 +65,16 @@ export class LobbyManager {
 
   // Timers para veto
   private vetoTimers: Map<string, NodeJS.Timeout> = new Map()
+  private setupTimers: Map<string, NodeJS.Timeout> = new Map()
 
 constructor() {
     this.redis = getRedisClient()
-    log('info', '✅ LobbyManager: Usando Redis singleton')
+    log('info', 'âœ… LobbyManager: Usando Redis singleton')
     
-    // Adicionamos um .catch() para capturar o erro de inicialização
+    // Adicionamos um .catch() para capturar o erro de inicializaÃ§Ã£o
     this.loadRankedMapPool().catch(err => {
-      log('error', '❌❌ FALHA CRÍTICA AO CARREGAR MAP POOL ❌❌', err);
-      // Em produção, você talvez queira derrubar o processo
+      log('error', 'âŒâŒ FALHA CRÃTICA AO CARREGAR MAP POOL âŒâŒ', err);
+      // Em produÃ§Ã£o, vocÃª talvez queira derrubar o processo
       // process.exit(1); 
     });
   }
@@ -101,9 +102,9 @@ constructor() {
    * Carrega a pool de mapas ranqueados (Modo 1) do banco de dados
    */
   private async loadRankedMapPool(): Promise<void> {
-    log('info', '🗺️ Carregando Map Pool ranqueada do banco de dados...')
+    log('info', 'ðŸ—ºï¸ Carregando Map Pool ranqueada do banco de dados...')
     try {
-      // Usamos prismaGame pois as tabelas são do banco principal do jogo
+      // Usamos prismaGame pois as tabelas sÃ£o do banco principal do jogo
       const maps = await prismaGame.$queryRaw<any[]>`
           SELECT DISTINCT 
               mo.MapID,
@@ -120,24 +121,24 @@ constructor() {
       this.rankedMapPool = maps.map((map: any) => ({
         mapId: this.normalizeMapId(map.MapName),
         mapName: this.normalizeMapName(map.MapName),
-        mapNumber: map.MapID // <-- CORREÇÃO: Adiciona o ID numérico
+        mapNumber: map.MapID // <-- CORREÃ‡ÃƒO: Adiciona o ID numÃ©rico
       }));
 
-      log('info', `🗺️ Map Pool carregada: ${this.rankedMapPool.length} mapas encontrados.`);
+      log('info', `ðŸ—ºï¸ Map Pool carregada: ${this.rankedMapPool.length} mapas encontrados.`);
       console.log(this.rankedMapPool.map(m => m.mapId)); // Loga os IDs que ele vai usar
 
     } catch (error) {
-      log('error', '❌ Falha ao carregar Map Pool ranqueada:', error)
+      log('error', 'âŒ Falha ao carregar Map Pool ranqueada:', error)
     }
   }
 
-  // Funções helper para normalizar nomes
+  // FunÃ§Ãµes helper para normalizar nomes
   private normalizeMapId(mapName: string): string {
     return mapName.toUpperCase()
       .replace(' [CAMP]', '')
       .replace('[CAMP]', '')  // Adicionado para casos como "Rattle [CAMP]"
-      .replace(/\s+|_+/g, '') // Remove TODOS os espaços e underscores
-      .replace(/'/g, '');     // Remove apóstrofos se houver
+      .replace(/\s+|_+/g, '') // Remove TODOS os espaÃ§os e underscores
+      .replace(/'/g, '');     // Remove apÃ³strofos se houver
   }
   
   private normalizeMapName(mapName: string): string {
@@ -145,10 +146,10 @@ constructor() {
   }
 
   /**
-   * Criar lobby após ready check passar
+   * Criar lobby apÃ³s ready check passar
    */
   async createLobby(matchId: string, teams: Team): Promise<void> {
-    log('info', `🏠 Criando lobby para match ${matchId}`)
+    log('info', `Criando lobby para match ${matchId}`)
 
     const lobbyState: LobbyState = {
       matchId,
@@ -156,16 +157,16 @@ constructor() {
       mapVotes: new Map(),
       vetoedMaps: [],
       vetoHistory: [],
-      currentTurn: 'ALPHA', // ALPHA sempre começa
+      currentTurn: null,
       vetoRound: 0,
-      timeRemaining: 20, // 20 segundos por veto
+      timeRemaining: 20,
       selectedMap: null,
       chatMessages: {
         ALPHA: [],
         BRAVO: []
       },
       generalChatMessages: [],
-      status: 'veto-phase'
+      status: 'setup-phase'
     }
 
     this.lobbies.set(matchId, lobbyState)
@@ -174,28 +175,12 @@ constructor() {
       ...teams.BRAVO.map(p => p.oidUser),
     ])
 
-    // Salva no Redis
-    await this.redis.set(
-      `lobby:${matchId}:state`,
-      JSON.stringify({
-        matchId,
-        teams,
-        vetoedMaps: [],
-        vetoHistory: [],
-        currentTurn: 'ALPHA',
-        vetoRound: 0,
-        timeRemaining: 20,
-        selectedMap: null,
-        status: 'veto-phase'
-      }),
-      { EX: 3600 } // 1 hora
-    )
+    await this.persistLobbyState(matchId, lobbyState)
 
-    log('info', `✅ Lobby ${matchId} criada com ${teams.ALPHA.length + teams.BRAVO.length} jogadores`)
-    log('info', `🎮 Fase de veto iniciada - Time ALPHA começa`)
+    log('info', `Lobby ${matchId} criada com ${teams.ALPHA.length + teams.BRAVO.length} jogadores`)
+    log('info', `Fase de setup iniciada - veto em 20s`)
 
-    // Inicia timer do veto
-    this.startVetoTimer(matchId)
+    this.startSetupTimer(matchId)
   }
 
   /**
@@ -210,6 +195,84 @@ constructor() {
    */
   getLobby(matchId: string): LobbyState | null {
     return this.lobbies.get(matchId) || null
+  }
+
+  /**
+   * Persistir estado base da lobby no Redis
+   */
+  private async persistLobbyState(matchId: string, lobby: LobbyState): Promise<void> {
+    try {
+      await this.redis.set(
+        `lobby:${matchId}:state`,
+        JSON.stringify({
+          matchId: lobby.matchId,
+          teams: lobby.teams,
+          vetoedMaps: lobby.vetoedMaps,
+          vetoHistory: lobby.vetoHistory,
+          currentTurn: lobby.currentTurn,
+          vetoRound: lobby.vetoRound,
+          timeRemaining: lobby.timeRemaining,
+          selectedMap: lobby.selectedMap,
+          status: lobby.status
+        }),
+        { EX: 3600 }
+      )
+    } catch (error) {
+      log('warn', `Falha ao persistir estado da lobby ${matchId}`, error)
+    }
+  }
+
+  /**
+   * Inicia a fase de setup (20s) e, ao expirar, alterna para veto-phase.
+   */
+  private startSetupTimer(matchId: string): void {
+    const existing = this.setupTimers.get(matchId)
+    if (existing) {
+      clearInterval(existing)
+    }
+
+    const lobby = this.lobbies.get(matchId)
+    if (!lobby || lobby.status !== 'setup-phase') return
+
+    lobby.timeRemaining = 20
+
+    const timer = setInterval(() => {
+      const currentLobby = this.lobbies.get(matchId)
+      if (!currentLobby || currentLobby.status !== 'setup-phase') {
+        clearInterval(timer)
+        this.setupTimers.delete(matchId)
+        return
+      }
+
+      currentLobby.timeRemaining -= 1
+
+      if (this.onVetoUpdateCallback) {
+        this.onVetoUpdateCallback(matchId, currentLobby)
+      }
+
+      if (currentLobby.timeRemaining <= 0) {
+        clearInterval(timer)
+        this.setupTimers.delete(matchId)
+
+        currentLobby.status = 'veto-phase'
+        currentLobby.currentTurn = 'ALPHA'
+        currentLobby.vetoRound = 0
+        currentLobby.timeRemaining = 20
+
+        this.persistLobbyState(matchId, currentLobby).catch(() => { })
+
+        if (this.onVetoUpdateCallback) {
+          this.onVetoUpdateCallback(matchId, currentLobby)
+        }
+        if (this.onTurnChangeCallback) {
+          this.onTurnChangeCallback(matchId, currentLobby.currentTurn, currentLobby.timeRemaining)
+        }
+
+        this.startVetoTimer(matchId)
+      }
+    }, 1000)
+
+    this.setupTimers.set(matchId, timer)
   }
 
   /**
@@ -239,12 +302,12 @@ constructor() {
 
       currentLobby.timeRemaining--
 
-      // Notifica sobre mudança de tempo (a cada segundo)
+      // Notifica sobre mudanÃ§a de tempo (a cada segundo)
       if (this.onVetoUpdateCallback) {
         this.onVetoUpdateCallback(matchId, currentLobby)
       }
 
-      // Tempo esgotado - veto aleatório
+      // Tempo esgotado - veto aleatÃ³rio
       if (currentLobby.timeRemaining <= 0) {
         clearInterval(timer)
         this.vetoTimers.delete(matchId)
@@ -256,24 +319,24 @@ constructor() {
   }
 
   /**
-   * Lidar com timeout do veto - veta um mapa aleatório
+   * Lidar com timeout do veto - veta um mapa aleatÃ³rio
    */
   private async handleVetoTimeout(matchId: string): Promise<void> {
     const lobby = this.lobbies.get(matchId)
     if (!lobby || !lobby.currentTurn) return
 
-    log('warn', `⏰ Timeout de veto para ${matchId} - Time ${lobby.currentTurn}`)
+    log('warn', `â° Timeout de veto para ${matchId} - Time ${lobby.currentTurn}`)
 
-    // Lista de mapas disponíveis (não vetados)
+    // Lista de mapas disponÃ­veis (nÃ£o vetados)
     const allMapIds = this.rankedMapPool.map(m => m.mapId);
     const availableMaps = allMapIds.filter(mapId => !lobby.vetoedMaps.includes(mapId));
 
     if (availableMaps.length === 0) return
 
-    // Escolhe aleatório
+    // Escolhe aleatÃ³rio
     const randomMap = availableMaps[Math.floor(Math.random() * availableMaps.length)]
 
-    log('info', `🎲 Veto automático: Time ${lobby.currentTurn} -> ${randomMap}`)
+    log('info', `ðŸŽ² Veto automÃ¡tico: Time ${lobby.currentTurn} -> ${randomMap}`)
 
     // Executa o veto
     await this.vetoMap(matchId, lobby.currentTurn, randomMap, 'AUTO')
@@ -299,7 +362,7 @@ constructor() {
 
     // Busca o nome do mapa para o log
     const finalMapName = this.rankedMapPool.find(m => m.mapId === chosenMapId)?.mapName || chosenMapId;
-    log('info', `✅ Mapa selecionado para ${matchId}: ${finalMapName}`);
+    log('info', `âœ… Mapa selecionado para ${matchId}: ${finalMapName}`);
 
     // Callback para o RankedWebSocketServer iniciar o HostManager
     if (this.onMapSelectedCallback) {
@@ -308,7 +371,7 @@ constructor() {
   }
   
 /**
-   * Executa a troca de papéis (assignedRole) entre dois jogadores no Redis.
+   * Executa a troca de papÃ©is (assignedRole) entre dois jogadores no Redis.
    */
 async executeRoleSwap(
     matchId: string, 
@@ -318,7 +381,7 @@ async executeRoleSwap(
     
     const lobby = this.lobbies.get(matchId);
     if (!lobby) {
-      log('warn', `Troca falhou: Lobby ${matchId} não encontrado.`);
+      log('warn', `Troca falhou: Lobby ${matchId} nÃ£o encontrado.`);
       return false;
     }
 
@@ -326,7 +389,7 @@ async executeRoleSwap(
     const teamB = lobby.teams.ALPHA.some(p => p.oidUser === userB_oid) ? 'ALPHA' : 'BRAVO';
 
     if (teamA !== teamB) {
-      log('warn', `Troca falhou: ${userA_oid} e ${userB_oid} não estão no mesmo time.`);
+      log('warn', `Troca falhou: ${userA_oid} e ${userB_oid} nÃ£o estÃ£o no mesmo time.`);
       return false;
     }
 
@@ -347,7 +410,7 @@ async executeRoleSwap(
       dataA = dataA_str ? JSON.parse(dataA_str as string) : null;
       dataB = dataB_str ? JSON.parse(dataB_str as string) : null;
 
-      // 3. Checar se os dados parseados são válidos
+      // 3. Checar se os dados parseados sÃ£o vÃ¡lidos
       if (!dataA || !dataB) {
         log('error', `Falha ao buscar/parsear classes no Redis para troca (match ${matchId})`, { 
           userA_oid,
@@ -358,7 +421,7 @@ async executeRoleSwap(
         return false;
       }
 
-      // 4. Trocar os papéis
+      // 4. Trocar os papÃ©is
       const originalRoleA = dataA.assignedRole;
       dataA.assignedRole = dataB.assignedRole;
       dataB.assignedRole = originalRoleA;
@@ -369,12 +432,12 @@ async executeRoleSwap(
         [userB_oid.toString()]: JSON.stringify(dataB)
       })
       
-      log('info', `🔄 Troca de papéis efetuada (Match ${matchId}): ${userA_oid} (${originalRoleA}) <> ${userB_oid} (${dataA.assignedRole})`);
+      log('info', `ðŸ”„ Troca de papÃ©is efetuada (Match ${matchId}): ${userA_oid} (${originalRoleA}) <> ${userB_oid} (${dataA.assignedRole})`);
       return true;
 
     } catch (error: any) {
-      // --- ESTE É O LOG DE DEBUG MAIS IMPORTANTE ---
-      log('error', `❌ ERRO FATAL EM executeRoleSwap (match ${matchId})`, { 
+      // --- ESTE Ã‰ O LOG DE DEBUG MAIS IMPORTANTE ---
+      log('error', `âŒ ERRO FATAL EM executeRoleSwap (match ${matchId})`, { 
           message: error.message,
           stack: error.stack,
           userA_oid,
@@ -391,26 +454,26 @@ async executeRoleSwap(
   }
 
   /**
-   * Vetar um mapa (Versão Otimizada)
+   * Vetar um mapa (VersÃ£o Otimizada)
    */
   async vetoMap(matchId: string, team: 'ALPHA' | 'BRAVO', mapId: string, source: 'PLAYER' | 'AUTO' = 'PLAYER'): Promise<boolean> {
     const lobby = this.lobbies.get(matchId);
     if (!lobby) {
-      log('warn', `⚠️ Tentativa de vetar em lobby inexistente: ${matchId}`);
+      log('warn', `âš ï¸ Tentativa de vetar em lobby inexistente: ${matchId}`);
       return false;
     }
 
-    // Validações (Guard Clauses)
+    // ValidaÃ§Ãµes (Guard Clauses)
     if (lobby.status !== 'veto-phase') {
-      log('warn', `⚠️ Tentativa de vetar fora da fase de veto: ${matchId}`);
+      log('warn', `âš ï¸ Tentativa de vetar fora da fase de veto: ${matchId}`);
       return false;
     }
     if (lobby.currentTurn !== team) {
-      log('warn', `⚠️ Time ${team} tentou vetar fora de sua vez (turno de ${lobby.currentTurn})`);
+      log('warn', `âš ï¸ Time ${team} tentou vetar fora de sua vez (turno de ${lobby.currentTurn})`);
       return false;
     }
     if (lobby.vetoedMaps.includes(mapId)) {
-      log('warn', `⚠️ Tentativa de vetar mapa já vetado: ${mapId}`);
+      log('warn', `âš ï¸ Tentativa de vetar mapa jÃ¡ vetado: ${mapId}`);
       return false;
     }
 
@@ -428,14 +491,14 @@ async executeRoleSwap(
       timestamp: Date.now()
     });
 
-    log('info', `${source === 'AUTO' ? '🎲' : '🚫'} Time ${team} vetou ${mapName} (rodada ${lobby.vetoRound + 1}/6)`);
+    log('info', `${source === 'AUTO' ? 'ðŸŽ²' : 'ðŸš«'} Time ${team} vetou ${mapName} (rodada ${lobby.vetoRound + 1}/6)`);
 
-    // Lógica principal (Simplificada)
-    // A regra é: 6 vetos no total (3 por time).
+    // LÃ³gica principal (Simplificada)
+    // A regra Ã©: 6 vetos no total (3 por time).
     const TOTAL_VETOS_REQUERIDOS = 6;
 
     if (lobby.vetoedMaps.length >= TOTAL_VETOS_REQUERIDOS) {
-      // **Fase de Veto Concluída: Seleciona o mapa**
+      // **Fase de Veto ConcluÃ­da: Seleciona o mapa**
       const allMaps = this.rankedMapPool.map(m => m.mapId);
       const remainingMaps = allMaps.filter(m => !lobby.vetoedMaps.includes(m));
 
@@ -445,23 +508,23 @@ async executeRoleSwap(
         this.finalizeMapSelection(lobby, chosen); // <-- Usa o helper
       } else {
         // Fallback (caso o map pool tenha 6 mapas ou menos)
-        log('warn', `⚠️ Não há mapas restantes para escolher em ${matchId}. Selecionando o último vetado.`);
+        log('warn', `âš ï¸ NÃ£o hÃ¡ mapas restantes para escolher em ${matchId}. Selecionando o Ãºltimo vetado.`);
         this.finalizeMapSelection(lobby, mapId); // <-- Usa o helper
       }
 
     } else {
-      // **Fase de Veto Continua: Próximo turno**
+      // **Fase de Veto Continua: PrÃ³ximo turno**
       lobby.vetoRound++;
       lobby.currentTurn = lobby.currentTurn === 'ALPHA' ? 'BRAVO' : 'ALPHA';
 
-      log('info', `🔄 Próximo turno: Time ${lobby.currentTurn}`);
+      log('info', `ðŸ”„ PrÃ³ximo turno: Time ${lobby.currentTurn}`);
 
-      // Notifica o frontend sobre a mudança de turno
+      // Notifica o frontend sobre a mudanÃ§a de turno
       if (this.onTurnChangeCallback) {
-        this.onTurnChangeCallback(matchId, lobby.currentTurn, 20); // 20s para o próximo
+        this.onTurnChangeCallback(matchId, lobby.currentTurn, 20); // 20s para o prÃ³ximo
       }
 
-      // Reinicia o timer para o próximo time
+      // Reinicia o timer para o prÃ³ximo time
       this.startVetoTimer(matchId);
     }
 
@@ -477,7 +540,7 @@ async executeRoleSwap(
       { EX: 3600 }
     );
 
-    // Notifica o frontend sobre a atualização (mapa vetado, etc.)
+    // Notifica o frontend sobre a atualizaÃ§Ã£o (mapa vetado, etc.)
     if (this.onVetoUpdateCallback) {
       this.onVetoUpdateCallback(matchId, lobby);
     }
@@ -491,14 +554,14 @@ async executeRoleSwap(
   async voteMap(matchId: string, oidUser: number, mapId: string): Promise<boolean> {
     const lobby = this.lobbies.get(matchId)
     if (!lobby) {
-      log('warn', `⚠️ Tentativa de votar em lobby inexistente: ${matchId}`)
+      log('warn', `âš ï¸ Tentativa de votar em lobby inexistente: ${matchId}`)
       return false
     }
 
     // Registra voto
     lobby.mapVotes.set(oidUser, mapId)
 
-    log('info', `🗳️ Player ${oidUser} votou em ${mapId} (${lobby.mapVotes.size}/${lobby.teams.ALPHA.length + lobby.teams.BRAVO.length})`)
+    log('info', `ðŸ—³ï¸ Player ${oidUser} votou em ${mapId} (${lobby.mapVotes.size}/${lobby.teams.ALPHA.length + lobby.teams.BRAVO.length})`)
 
     // Conta votos
     const voteCount = new Map<string, number>()
@@ -544,7 +607,7 @@ async executeRoleSwap(
         { EX: 3600 }
       )
 
-      log('info', `✅ Mapa selecionado para ${matchId}: ${selectedMap}`)
+      log('info', `âœ… Mapa selecionado para ${matchId}: ${selectedMap}`)
 
       // Callback
       if (this.onMapSelectedCallback) {
@@ -648,6 +711,11 @@ async executeRoleSwap(
       clearInterval(timer)
       this.vetoTimers.delete(matchId)
     }
+    const setupTimer = this.setupTimers.get(matchId)
+    if (setupTimer) {
+      clearInterval(setupTimer)
+      this.setupTimers.delete(matchId)
+    }
 
     this.lobbies.delete(matchId)
 
@@ -679,7 +747,7 @@ async executeRoleSwap(
   }
 
   /**
-   * Marca jogadores como pertencentes a uma lobby ativa (índice rápido player -> lobby)
+   * Marca jogadores como pertencentes a uma lobby ativa (Ã­ndice rÃ¡pido player -> lobby)
    */
   private async setActiveLobbyForPlayers(matchId: string, playerIds: number[]): Promise<void> {
     if (!playerIds.length) return
@@ -691,7 +759,7 @@ async executeRoleSwap(
   }
 
   /**
-   * Limpa o mapeamento player -> lobby (quando lobby é finalizada ou expira)
+   * Limpa o mapeamento player -> lobby (quando lobby Ã© finalizada ou expira)
    */
   async clearActiveLobbyForPlayers(playerIds: number[]): Promise<void> {
     if (!playerIds.length) return
@@ -702,3 +770,5 @@ async executeRoleSwap(
     await multi.exec()
   }
 }
+
+

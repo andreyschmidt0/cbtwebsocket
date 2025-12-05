@@ -2,6 +2,7 @@ import { WebSocket } from 'ws'
 import { getRedisClient } from '../database/redis-client'
 import { log } from '../utils/logger'
 import { prismaRanked } from '../database/prisma'
+import { DiscordService } from '../services/discord-service'
 
 export interface HostPlayer {
   oidUser: number
@@ -24,12 +25,14 @@ export class HOSTManager {
   private redis = getRedisClient()
   private readonly HOST_TIMEOUT = 120000 // 2 min
   private readonly HOST_COOLDOWN_SECONDS = 300 // 5 minutos
+  private discordService?: DiscordService
 
   private onHostSelectedCallback?: (matchId: string, hostOidUser: number, hostUsername: string, mapNumber: number) => void
   private onRoomConfirmedCallback?: (matchId: string, roomId: number, mapNumber: number) => void
   private onHostAbortedCallback?: (matchId: string, hostOidUser: number, reason: string, playerIds: number[]) => void
 
-  constructor() {
+  constructor(discordService?: DiscordService) {
+    this.discordService = discordService
     log('info', 'HOSTManager: usando Redis singleton')
   }
 
@@ -178,6 +181,12 @@ export class HOSTManager {
     await this.redis.set(`match:${matchId}:status`, 'in-progress', { EX: 7200 }) //
     // --- FIM DA CORREÇÃO ---
 
+    if (this.discordService) {
+      this.discordService.createTeamChannels(matchId, roomId).catch((err) => {
+        log('warn', `Falha ao criar canais do Discord para match ${matchId}`, err)
+      })
+    }
+
     await this.redis.del(`match:${matchId}:host`)
     this.activeHosts.delete(matchId)
 
@@ -253,6 +262,13 @@ export class HOSTManager {
           endedAt = GETDATE()
         WHERE id = ${matchId}
       `
+      if (this.discordService) {
+        try {
+          await this.discordService.deleteChannelsByMatchId(matchId)
+        } catch (err) {
+          log('warn', `Falha ao remover canais do Discord para ${matchId}`, err)
+        }
+      }
       // --- Cleanup do Redis (como fizemos antes) ---
       log('debug', `[Cleanup ${matchId}] Deletando chaves do Redis...`)
       await this.redis.del(`match:${matchId}:host`)

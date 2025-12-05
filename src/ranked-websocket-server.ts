@@ -10,6 +10,7 @@ import { LobbyManager } from './managers/lobby-manager';
 import { FriendManager } from './managers/friend-manager';
 import { PartyManager } from './managers/party-manager';
 import { QueuePlayer, ReadyPlayer } from './types';
+import { DiscordService } from './services/discord-service';
 import { prismaRanked, prismaGame } from './database/prisma';
 import { log } from './utils/logger';
 import { getRedisClient } from './database/redis-client';
@@ -83,6 +84,7 @@ export class RankedWebSocketServer {
   private wss: WebSocketServer;
   private clients: Map<number, AuthenticatedWebSocket> = new Map();
   private heartbeatInterval?: NodeJS.Timeout;
+  private discordService: DiscordService;
 
   // Managers
   private queueManager: QueueManager;
@@ -155,9 +157,15 @@ export class RankedWebSocketServer {
     this.wss = new WebSocketServer({ server: this.httpServer });
 
     // 5. Inicializar todos os managers
+    this.discordService = new DiscordService({
+      botToken: process.env.DISCORD_BOT_TOKEN,
+      guildId: process.env.DISCORD_GUILD_ID,
+      teamCategoryId: process.env.DISCORD_TEAM_CATEGORY_ID,
+      generalChannelId: process.env.DISCORD_GENERAL_CHANNEL_ID
+    });
     this.queueManager = new QueueManager();
     this.readyManager = new ReadyManager();
-    this.hostManager = new HOSTManager();
+    this.hostManager = new HOSTManager(this.discordService);
     this.lobbyManager = new LobbyManager();
     this.friendManager = new FriendManager();
     this.partyManager = new PartyManager();
@@ -165,7 +173,11 @@ export class RankedWebSocketServer {
       onMatchCompleted: async (matchId, result) => {
         log('debug', `✅ Match ${matchId} validado! Vencedor: ${result.winner}`);
 
-		await this.redis.publish("discord:actions", JSON.stringify({ type: 'DELETE_CHANNELS', matchId: matchId }));
+        try {
+          await this.discordService.deleteChannelsByMatchId(matchId)
+        } catch (err) {
+          log('warn', `Falha ao remover canais do Discord para ${matchId}`, err)
+        }
 
         // Busca jogadores e stats da partida (inclui MMR já atualizado)
         const matchPlayers = await prismaRanked.$queryRaw<any[]>`
@@ -267,9 +279,15 @@ export class RankedWebSocketServer {
         }
       },
       onMatchTimeout: async (matchId) => {
-        log('warn', `⏰ Match ${matchId} timeout - sem logs suficientes`);
+        log('warn', `? Match ${matchId} timeout - sem logs suficientes`);
 
-        // ... (lógica de onMatchTimeout - sem mudanças) ...
+        try {
+          await this.discordService.deleteChannelsByMatchId(matchId)
+        } catch (err) {
+          log('warn', `Falha ao remover canais do Discord para ${matchId}`, err)
+        }
+
+        // ... (l¢gica de onMatchTimeout - sem mudan‡as) ...
         const players = await prismaRanked.$queryRaw<any[]>`
           SELECT oidUser FROM BST_MatchPlayer WHERE matchId = ${matchId}
         `;
@@ -286,8 +304,15 @@ export class RankedWebSocketServer {
           }
         );
       },
+
       onMatchInvalid: async (matchId, reason) => {
         log('warn', `❌ Match ${matchId} inválido: ${reason}`);
+
+        try {
+          await this.discordService.deleteChannelsByMatchId(matchId)
+        } catch (err) {
+          log('warn', `Falha ao remover canais do Discord para ${matchId}`, err)
+        }
 
         // ... (lógica de onMatchInvalid - sem mudanças) ...
         const players = await prismaRanked.$queryRaw<any[]>`
@@ -726,28 +751,6 @@ this.readyManager.onReadyFailed(async (
         ...lobby.teams.BRAVO.map(p => p.oidUser)
       ];
 
-	try {
-			// Prepara dados dos times com os Discord IDs (essencial para o bot)
-			const getTeamDiscordIds = (team: 'ALPHA' | 'BRAVO') => {
-			  return lobby.teams[team].map(p => {
-				const client = this.clients.get(p.oidUser);
-				return { oidUser: p.oidUser, discordId: client?.discordId };
-			  }).filter(p => p.discordId); // Filtra quem não tem discordId
-			};
-
-			const teamsPayload = {
-			  alpha: getTeamDiscordIds('ALPHA'),
-			  bravo: getTeamDiscordIds('BRAVO')
-			};
-
-			await this.redis.publish("discord:actions", JSON.stringify({
-			  type: 'CREATE_CHANNELS',
-			  matchId: matchId,
-			  teams: teamsPayload
-			}));
-		  } catch (e) {
-			log('error', `Falha ao publicar CREATE_CHANNELS no Redis para match ${matchId}`, e);
-		  }
 
       // Recupera senha do Redis
       const hostPassword = await this.redis.get(`match:${matchId}:hostPassword`);
@@ -902,14 +905,8 @@ this.readyManager.onReadyFailed(async (
           break
 		  
         case 'LOBBY_ACCEPT_VOICE_TRANSFER':
-          if (ws.oidUser && ws.discordId && payload.matchId) {
-            this.redis.publish("discord:actions", JSON.stringify({
-              type: 'MOVE_PLAYER',
-              oidUser: ws.oidUser,
-              discordId: ws.discordId,
-              matchId: payload.matchId
-            }));
-          }
+        case 'REQUEST_DISCORD_MOVE':
+          await this.handleDiscordMoveRequest(ws, payload);
           break;
 
         case 'FRIEND_SEND':
@@ -2210,11 +2207,57 @@ this.readyManager.onReadyFailed(async (
         generalChatMessages: playerTeam ? this.buildGeneralChatHistory(lobby, playerTeam) : [],
         status: lobby.status,
         classesByPlayer: filteredClassesByPlayer, // <-- CORRIGIDO
-        mapPool: mapPool // <-- ADICIONE ESTA LINHA
+        mapPool: mapPool, // <-- ADICIONE ESTA LINHA
+        discord: this.discordService.getGeneralChannelInfo()
       }
     });
     log('debug', `🏰 ${ws.username} entrou na lobby ${matchId}`);
   }
+  /**
+   * REQUEST_DISCORD_MOVE / LOBBY_ACCEPT_VOICE_TRANSFER - mover jogador para o canal do time no Discord
+   */
+  private async handleDiscordMoveRequest(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return
+
+    const matchId = payload?.matchId as string | undefined
+    const respond = (success: boolean, reason?: string, channelId?: string) => {
+      this.sendMessage(ws, {
+        type: 'DISCORD_MOVE_RESULT',
+        payload: { matchId, success, reason, channelId }
+      })
+    }
+
+    if (!matchId) {
+      respond(false, 'MATCH_ID_MISSING')
+      return
+    }
+
+    const lobby = this.lobbyManager.getLobby(matchId)
+    if (!lobby) {
+      respond(false, 'LOBBY_NOT_FOUND')
+      return
+    }
+
+    const isAlpha = lobby.teams.ALPHA.some(p => p.oidUser === ws.oidUser)
+    const isBravo = lobby.teams.BRAVO.some(p => p.oidUser === ws.oidUser)
+    const team: 'ALPHA' | 'BRAVO' | null = isAlpha ? 'ALPHA' : isBravo ? 'BRAVO' : null
+
+    if (!team) {
+      respond(false, 'NOT_IN_LOBBY')
+      return
+    }
+
+    if (!ws.discordId) {
+      respond(false, 'MISSING_DISCORD_ID')
+      return
+    }
+
+    const moveResult = await this.discordService.movePlayerToTeamChannel(matchId, team, ws.discordId)
+
+    respond(moveResult.ok, moveResult.reason, moveResult.channelId)
+  }
+
+
 
   /**
    * MAP_VETO - Jogador vetou um mapa
