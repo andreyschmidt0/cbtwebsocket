@@ -123,26 +123,64 @@ export class DiscordService {
     }
   }
 
-  async createTeamChannels(matchId: string, roomId: number | string): Promise<{ alphaChannelId?: string; bravoChannelId?: string }> {
+  async createTeamChannels(
+    matchId: string,
+    roomId: number | string,
+    teamMembers?: Partial<Record<TeamKey, string[]>>
+  ): Promise<{ alphaChannelId?: string; bravoChannelId?: string }> {
     if (!this.isEnabled()) return {}
 
+    const VIEW = 1n << 10n
+    const CONNECT = 1n << 20n
+    const SPEAK = 1n << 21n
+    const STREAM = 1n << 22n
+    const USE_VAD = 1n << 25n
+    const allowVoicePermissions = (VIEW | CONNECT | SPEAK | STREAM | USE_VAD).toString()
+    const denyViewConnect = (VIEW | CONNECT).toString()
+
+    const buildOverwrites = (team: TeamKey) => {
+      const allowed = (teamMembers?.[team] || []).filter(Boolean)
+      if (!allowed.length) return undefined
+
+      const overwrites: Array<{ id: string; type: 0 | 1; allow?: string; deny?: string }> = []
+
+      if (this.guildId) {
+        overwrites.push({
+          id: this.guildId,
+          type: 0, // @everyone role
+          deny: denyViewConnect
+        })
+      }
+
+      for (const id of allowed) {
+        overwrites.push({
+          id,
+          type: 1, // member
+          allow: allowVoicePermissions
+        })
+      }
+
+      return overwrites
+    }
+
     const parent_id = this.teamCategoryId
-    const createChannel = async (name: string) => {
+    const createChannel = async (name: string, team: TeamKey) => {
       const result = await this.discordRequest(`/guilds/${this.guildId}/channels`, {
         method: 'POST',
         body: JSON.stringify({
           name,
           type: 2, // voice
           parent_id,
-          user_limit: 5
+          user_limit: 5,
+          permission_overwrites: buildOverwrites(team)
         })
       })
       return result.ok ? (result.data?.id as string | undefined) : undefined
     }
 
     const [alphaChannelId, bravoChannelId] = await Promise.all([
-      createChannel(`ALPHA-${roomId}`),
-      createChannel(`BRAVO-${roomId}`)
+      createChannel(`ALPHA-${roomId}`, 'ALPHA'),
+      createChannel(`BRAVO-${roomId}`, 'BRAVO')
     ])
 
     try {

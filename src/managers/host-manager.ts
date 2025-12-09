@@ -9,6 +9,8 @@ export interface HostPlayer {
   username: string
   ws: WebSocket | null
   mmr: number
+  team?: 'ALPHA' | 'BRAVO'
+  discordId?: string
 }
 
 interface HostAttempt {
@@ -182,7 +184,19 @@ export class HOSTManager {
     // --- FIM DA CORREÇÃO ---
 
     if (this.discordService) {
-      this.discordService.createTeamChannels(matchId, roomId).catch((err) => {
+      const alphaDiscordIds = attempt.players
+        .filter(p => p.team === 'ALPHA')
+        .map(p => p.discordId || (p.ws as any)?.discordId)
+        .filter((id): id is string => Boolean(id))
+      const bravoDiscordIds = attempt.players
+        .filter(p => p.team === 'BRAVO')
+        .map(p => p.discordId || (p.ws as any)?.discordId)
+        .filter((id): id is string => Boolean(id))
+
+      this.discordService.createTeamChannels(matchId, roomId, {
+        ALPHA: alphaDiscordIds,
+        BRAVO: bravoDiscordIds,
+      }).catch((err) => {
         log('warn', `Falha ao criar canais do Discord para match ${matchId}`, err)
       })
     }

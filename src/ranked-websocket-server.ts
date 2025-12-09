@@ -628,6 +628,7 @@ this.readyManager.onReadyFailed(async (
           oidUser: p.oidUser,
           username: client?.username || p.username, // Usa o username real
           team: alphaPlayers.some(ap => ap.oidUser === p.oidUser) ? 'ALPHA' : 'BRAVO',
+          discordId: client?.discordId,
           mmr: Number(p.mmr) || 1000,
           ws: client || null // Passa o WebSocket real
         }
@@ -1341,24 +1342,67 @@ this.readyManager.onReadyFailed(async (
 /**
    * LOBBY_REQUEST_SWAP - Jogador solicita troca com um colega
    */
-  private async handleLobbyRequestSwap(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
-    if (!ws.oidUser || !ws.username) return;
-    const { matchId, targetOidUser } = payload;
-    if (!matchId || !targetOidUser) return;
+  private async handleLobbyRequestSwap(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const {
+      matchId,
+      targetOidUser,
+      requestingOidUser,
+      requestingTeam,
+      tier
+    } = payload || {};
+    if (!matchId || !targetOidUser) return;
 
-    const lobby = this.lobbyManager.getLobby(matchId);
-    if (!lobby) return;
+    const lobby = this.lobbyManager.getLobby(matchId);
+    if (!lobby) return;
 
-    // Envia a solicitação APENAS para o jogador alvo
-    this.sendToPlayer(targetOidUser, {
-      type: 'LOBBY_SWAP_REQUESTED',
-      payload: {
-        matchId,
-        requestingOidUser: ws.oidUser,
-        requestingUsername: ws.username
-      }
-    });
-  }
+    const requesterId = requestingOidUser || ws.oidUser;
+    const targetTeam = lobby.teams.ALPHA.some(p => p.oidUser === targetOidUser)
+      ? 'ALPHA'
+      : lobby.teams.BRAVO.some(p => p.oidUser === targetOidUser)
+        ? 'BRAVO'
+        : null;
+    const derivedRequesterTeam = requestingTeam
+      || (lobby.teams.ALPHA.some(p => p.oidUser === requesterId)
+        ? 'ALPHA'
+        : lobby.teams.BRAVO.some(p => p.oidUser === requesterId)
+          ? 'BRAVO'
+          : null);
+
+    if (targetTeam && derivedRequesterTeam && targetTeam !== derivedRequesterTeam) {
+      this.sendError(ws, 'Troca invalida: jogadores precisam estar no mesmo time.');
+      return;
+    }
+
+    let tierLabel: string | undefined = tier;
+    if (!tierLabel) {
+      try {
+        const rawClass = await this.redis.hGet(`match:${matchId}:classes`, String(requesterId));
+        if (rawClass) {
+          const parsed = JSON.parse(rawClass);
+          tierLabel = parsed?.assignedRole || parsed?.primary || parsed?.secondary;
+        }
+      } catch (error) {
+        log('warn', `Falha ao obter classe do jogador ${requesterId} para swap`, error);
+      }
+    }
+
+    const requesterName =
+      ws.username
+      || [...lobby.teams.ALPHA, ...lobby.teams.BRAVO].find(p => p.oidUser === requesterId)?.username
+      || `Player ${requesterId}`;
+
+    this.sendToPlayer(targetOidUser, {
+      type: 'LOBBY_SWAP_REQUESTED',
+      payload: {
+        matchId,
+        requestingOidUser: requesterId,
+        requestingUsername: requesterName,
+        tier: tierLabel,
+        team: derivedRequesterTeam || targetTeam
+      }
+    });
+  }
 
   /**
    * LOBBY_ACCEPT_SWAP - Jogador aceita uma solicitação de troca
