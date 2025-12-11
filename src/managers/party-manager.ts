@@ -113,4 +113,19 @@ export class PartyManager {
     }
     await multi.exec()
   }
+
+  /**
+   * Renova o TTL das chaves da party (party + Ìndice por jogador), sem alterar membros/lÌder.
+   * Útil para manter a party viva enquanto os jogadores est„o em lobby/partida.
+   */
+  async refreshPartyTtl(partyId: string): Promise<void> {
+    const party = await this.getParty(partyId)
+    if (!party) return
+    const multi = this.redis.multi()
+    multi.expire(this.partyKey(party.id), 3600)
+    for (const m of party.members) {
+      multi.expire(this.playerIndexKey(m), 3600)
+    }
+    await multi.exec()
+  }
 }

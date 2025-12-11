@@ -207,6 +207,9 @@ export class RankedWebSocketServer {
           recipientIds = fallbackPlayers.map(p => p.oidUser);
         }
 
+        // Mantém a party viva para permitir requeue em grupo após o match
+        await this.keepPartyAliveForPlayers(recipientIds);
+
         const abandonmentSet = new Set(result.abandonments);
         const playerSummaries = matchPlayers.map(player => {
             const kills = Number(player.kills) || 0;
@@ -1076,6 +1079,11 @@ this.readyManager.onReadyFailed(async (
         log('debug', `[AUTH] Reenviando LOBBY_DATA para ${oidUser} (lobby ${activeLobbyId})`);
         await this.handleLobbyJoin(ws, { matchId: activeLobbyId });
       }
+      // Mantém a party viva (renova TTL) se existir
+      const partyId = await this.partyManager.getPartyIdByPlayer(oidUser);
+      if (partyId) {
+        await this.partyManager.refreshPartyTtl(partyId);
+      }
     } catch (err) {
       log('warn', `Falha ao reemitir LOBBY_DATA pós-AUTH para ${oidUser}`, err);
     }
@@ -1802,6 +1810,9 @@ this.readyManager.onReadyFailed(async (
       return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'NO_PARTY' } });
     }
 
+    // Se a party estava na fila, remove todos antes de alterar a party
+    await this.removePartyFromQueue(partyId);
+
     // Limpa convites pendentes enviados por este jogador (evita bloquear reenvio)
     await this.clearPartyInvitesForUser(ws.oidUser);
 
@@ -1827,6 +1838,10 @@ this.readyManager.onReadyFailed(async (
     if (!party || party.leaderId !== ws.oidUser) {
       return this.sendMessage(ws, { type: 'PARTY_ERROR', payload: { reason: 'NOT_LEADER' } });
     }
+
+    // Se a party estava na fila, remove todos antes de alterar a party
+    await this.removePartyFromQueue(partyId);
+
     const updated = await this.partyManager.removeMember(partyId, targetOidUser);
     try {
       const a = Math.min(ws.oidUser, targetOidUser);
@@ -1890,6 +1905,22 @@ this.readyManager.onReadyFailed(async (
       const client = this.clients.get(oid);
       if (client && client.readyState === WebSocket.OPEN) {
         this.sendMessage(client, { type: 'PARTY_UPDATED', payload: { party } });
+      }
+    }
+  }
+
+  /**
+   * Remove todos os membros da party da fila, caso estejam em matchmaking.
+   * Evita inconsistÍncia quando alguém sai/kicka enquanto a party já estava na fila.
+   */
+  private async removePartyFromQueue(partyId: string): Promise<void> {
+    const party = await this.partyManager.getParty(partyId);
+    if (!party) return;
+
+    for (const memberId of party.members) {
+      if (this.queueManager.isInQueue(memberId)) {
+        await this.queueManager.removeFromQueue(memberId);
+        this.sendToPlayer(memberId, { type: 'QUEUE_LEFT' });
       }
     }
   }
@@ -2075,6 +2106,9 @@ this.readyManager.onReadyFailed(async (
         }
       });
     }
+
+    // Mantém a party viva para que possam voltar juntos à fila
+    await this.keepPartyAliveForPlayers(playerIds);
 
     // Limpa estado de lobby/host e artefatos de Redis mesmo que o host não tenha criado sala
     if (lobby) {
@@ -2731,6 +2765,8 @@ private async validateAuthToken(params: TokenValidationParams): Promise<TokenVal
       });
     }
 
+    await this.keepPartyAliveForPlayers(playerIds);
+
     try {
       await this.redis.del(`match:${matchId}:queueSnapshot`);
     } catch { }
@@ -2838,6 +2874,28 @@ private async validateAuthToken(params: TokenValidationParams): Promise<TokenVal
   }
 
   /**
+   * Renova o TTL e reenviA o estado da party para os jogadores informados (se houver party).
+   * Ajuda a manter a dupla/grupo junta ao sair de uma partida/lobby e voltar à fila.
+   */
+  private async keepPartyAliveForPlayers(playerIds: number[]): Promise<void> {
+    const processed = new Set<string>()
+    for (const oid of playerIds) {
+      const partyId = await this.partyManager.getPartyIdByPlayer(oid)
+      if (!partyId || processed.has(partyId)) continue
+      processed.add(partyId)
+      try {
+        await this.partyManager.refreshPartyTtl(partyId)
+        const party = await this.partyManager.getParty(partyId)
+        if (party) {
+          this.broadcastPartyUpdate(party)
+        }
+      } catch (err) {
+        log('warn', `Falha ao manter party viva (party ${partyId})`, err)
+      }
+    }
+  }
+
+  /**
    * Obter estatísticas
    */
   getStats(): { connectedPlayers: number, totalConnections: number } {
@@ -2936,4 +2994,3 @@ if (require.main === module) {
     log('debug', `📊 Stats: ${stats.connectedPlayers} jogadores conectados`);
   }, 30000);
 }
-

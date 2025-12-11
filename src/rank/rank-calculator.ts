@@ -48,6 +48,7 @@ export interface RankChangeBreakdown {
   mvp: number
   balance: number
   streak: number
+  performance: number
   penalties: number
   wasMvp: boolean
 }
@@ -68,7 +69,7 @@ export interface RankChangeResult {
 
 const BASE_POINTS = {
   WIN: 15,
-  LOSS: -15
+  LOSS: -18
 }
 
 const STREAK_BONUS_PER_WIN = 2
@@ -79,8 +80,22 @@ export function calculateRankChanges(
   context: RankMatchContext
 ): RankChangeResult[] {
   const mvpOid = determineMvp(players)
+  // Calcula desempenho individual e estatÍsticas por time para mitigar perda em derrotas
+  const performanceScores = new Map<number, number>()
+  const teamBuckets: Record<'ALPHA' | 'BRAVO', number[]> = { ALPHA: [], BRAVO: [] }
+  for (const player of players) {
+    const score = computePerformanceScore(player.stats)
+    performanceScores.set(player.oidUser, score)
+    teamBuckets[player.team].push(score)
+  }
+  const teamStats = {
+    ALPHA: computeMeanStd(teamBuckets.ALPHA),
+    BRAVO: computeMeanStd(teamBuckets.BRAVO)
+  }
+
   return players.map(player => {
-    const breakdown = calculateBreakdown(player, context, mvpOid)
+    const score = performanceScores.get(player.oidUser) ?? 0
+    const breakdown = calculateBreakdown(player, context, mvpOid, score, teamStats[player.team])
     return finalizeResult(player, breakdown)
   })
 }
@@ -88,7 +103,9 @@ export function calculateRankChanges(
 function calculateBreakdown(
   player: RankCalculationPlayerInput,
   context: RankMatchContext,
-  mvpOid?: number
+  mvpOid?: number,
+  performanceScore: number = 0,
+  teamStat: { mean: number; std: number } = { mean: 0, std: 1 }
 ): RankChangeBreakdown {
   const base = player.didWin ? BASE_POINTS.WIN : BASE_POINTS.LOSS
   const kills = Math.floor((player.stats.kills || 0) / 5)
@@ -110,6 +127,14 @@ function calculateBreakdown(
   const streakBonus = player.didWin && newStreak > 1 ? (newStreak - 1) * STREAK_BONUS_PER_WIN : 0
   const penalties = player.penalty?.points ?? 0
 
+  // Mitiga perda em derrotas conforme desempenho relativo ao time
+  let performance = 0
+  if (!player.didWin) {
+    const z = teamStat.std > 0 ? (performanceScore - teamStat.mean) / teamStat.std : 0
+    const clamped = Math.max(-2.0, Math.min(2.0, z))
+    performance = Math.round(clamped * 5) // varia de -10 a +10 (após clamp)
+  }
+
   return {
     base,
     kills,
@@ -117,6 +142,7 @@ function calculateBreakdown(
     mvp: mvpBonus,
     balance,
     streak: streakBonus,
+    performance,
     penalties,
     wasMvp: didGetMvp
   }
@@ -130,6 +156,7 @@ function finalizeResult(player: RankCalculationPlayerInput, breakdown: RankChang
     breakdown.mvp +
     breakdown.balance +
     breakdown.streak +
+    breakdown.performance +
     breakdown.penalties
 
   const oldTier = player.state.rankTier
@@ -231,16 +258,32 @@ function determineMvp(players: RankCalculationPlayerInput[]): number | undefined
   let bestScore = -Infinity
   let bestOid: number | undefined
   for (const player of players) {
-    const { kills, deaths, headshots, bombPlants, bombDefuses } = player.stats
+    const { kills, deaths, headshots, bombPlants, bombDefuses, assists } = player.stats
     const kd = deaths > 0 ? kills / deaths : kills
     const objectiveScore = bombPlants + bombDefuses
-    const score = kills * 1.5 + kd + headshots * 0.4 + objectiveScore * 2 + (player.didWin ? 2 : 0)
+    const score = kills * 1.5 + kd + headshots * 0.4 + objectiveScore * 2 + assists * 0.5 + (player.didWin ? 2 : 0)
     if (score > bestScore) {
       bestScore = score
       bestOid = player.oidUser
     }
   }
   return bestOid
+}
+
+// Usa a mesma base do critÈrio de MVP, mas sem depender do resultado (vitÛria/derrota)
+function computePerformanceScore(stats: PlayerMatchStats): number {
+  const { kills, deaths, headshots, bombPlants, bombDefuses, assists } = stats
+  const kd = deaths > 0 ? kills / deaths : kills
+  const objectiveScore = bombPlants + bombDefuses
+  return kills * 1.5 + kd + headshots * 0.4 + objectiveScore * 2 + assists * 0.5
+}
+
+function computeMeanStd(values: number[]): { mean: number; std: number } {
+  if (!values.length) return { mean: 0, std: 1 }
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length
+  const variance = values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length
+  const std = Math.sqrt(Math.max(variance, 0.0001))
+  return { mean, std }
 }
 
 function resolveMd5Series(
