@@ -1514,7 +1514,8 @@ this.readyManager.onReadyFailed(async (
    */
   private async handleFriendSend(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
     if (!ws.oidUser) return;
-    const targetOidUser = await this.resolveTargetUserId(payload);
+    // AdiÇ½o de amigos agora Ç¸ feita apenas via NickName (sem enviar oid direto)
+    const targetOidUser = await this.resolveTargetUserIdByNickname(payload);
     if (!targetOidUser) {
       return this.sendError(ws, 'TARGET_REQUIRED');
     }
@@ -1631,6 +1632,29 @@ this.readyManager.onReadyFailed(async (
       }
     } catch (err) {
       log('warn', `Falha ao resolver targetLogin ${targetLogin}`, err);
+    }
+    return null;
+  }
+
+  // Resolver target apenas por NickName (adição de amigos)
+  private async resolveTargetUserIdByNickname(payload: any): Promise<number | null> {
+    const targetLogin =
+      (payload?.targetLogin as string | undefined)?.trim() ||
+      (payload?.targetNickname as string | undefined)?.trim() ||
+      (payload?.nickname as string | undefined)?.trim() ||
+      (payload?.nick as string | undefined)?.trim();
+
+    if (!targetLogin) return null;
+
+    try {
+      const rows = await prismaGame.$queryRaw<any[]>`
+        SELECT TOP 1 oiduser FROM CBT_User WHERE NickName = ${targetLogin}
+      `;
+      if (rows && rows[0]?.oiduser) {
+        return Number(rows[0].oiduser);
+      }
+    } catch (err) {
+      log('warn', `Falha ao resolver NickName ${targetLogin}`, err);
     }
     return null;
   }
