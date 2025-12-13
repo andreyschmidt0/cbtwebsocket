@@ -162,9 +162,11 @@ export class FriendManager {
       const rows = await prismaRanked.$queryRaw<{ requesterId: number; targetId: number; status: FriendStatus }[]>`
         SELECT requesterId, targetId, status
         FROM BST_Friends
-        WHERE status = 'PENDING' AND targetId = ${oidUser}
+        WHERE status = 'PENDING' AND (targetId = ${oidUser} OR requesterId = ${oidUser})
       `
-      const ids = rows.map(r => r.requesterId)
+      const ids = Array.from(
+        new Set(rows.map(r => (r.requesterId === oidUser ? r.targetId : r.requesterId)))
+      )
       const users =
         ids.length > 0
           ? await prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
@@ -172,12 +174,15 @@ export class FriendManager {
             )
           : []
       const nameById = new Map<number, string | null>(users.map(u => [u.oiduser, u.NickName]))
-      return rows.map(r => ({
-        oidUser: r.requesterId,
-        username: nameById.get(r.requesterId) ?? null,
-        status: r.status,
-        isRequester: false
-      }))
+      return rows.map(r => {
+        const otherUserId = r.requesterId === oidUser ? r.targetId : r.requesterId
+        return {
+          oidUser: otherUserId,
+          username: nameById.get(otherUserId) ?? null,
+          status: r.status,
+          isRequester: r.requesterId === oidUser
+        }
+      })
     } catch (err) {
       log('error', 'Erro ao listar pendentes', err)
       return []
