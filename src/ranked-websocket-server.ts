@@ -1999,6 +1999,14 @@ this.readyManager.onReadyFailed(async (
       log('warn', `Falha ao validar tiers da party ${partyId}`, err)
     }
 
+    // 4) Checa se todos os membros estão CONECTADOS ao WebSocket
+    for (const oid of members) {
+      const client = this.clients.get(oid)
+      if (!client || client.readyState !== WebSocket.OPEN) {
+        return { ok: false, reason: 'PARTY_MEMBER_OFFLINE', offender: oid }
+      }
+    }
+
     return { ok: true }
   }
 
