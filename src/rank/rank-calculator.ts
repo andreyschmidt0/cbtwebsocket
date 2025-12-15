@@ -23,10 +23,14 @@
  * - Clamp entre -2.0 e +2.0
  * - Multiplica por 7.5 → range de -15 a +15 pontos
  *
+ * LIMITE DE PERDA:
+ * - Perda máxima: -30 MMR (jogadores que jogaram normalmente)
+ * - Perda máxima com FORFEIT: -50 MMR (abandonou a partida)
+ *
  * Exemplo Real (Time Perdedor de 5 jogadores):
  * - Melhor jogador (18K/14D): ~-20 MMR (mitigação alta)
- * - Jogador médio (10K/16D): ~-30 MMR (mitigação neutra)
- * - Pior jogador (6K/20D): ~-40 MMR (mitigação negativa)
+ * - Jogador médio (10K/16D): ~-28 MMR (mitigação neutra)
+ * - Pior jogador (6K/20D): -30 MMR (limitado no máximo, era -46 antes do limite)
  *
  * PARA VENCEDORES:
  * ================
@@ -187,7 +191,7 @@ function calculateBreakdown(
 }
 
 function finalizeResult(player: RankCalculationPlayerInput, breakdown: RankChangeBreakdown): RankChangeResult {
-  const componentsTotal =
+  let componentsTotal =
     breakdown.base +
     breakdown.kills +
     breakdown.kdr +
@@ -196,6 +200,14 @@ function finalizeResult(player: RankCalculationPlayerInput, breakdown: RankChang
     breakdown.streak +
     breakdown.performance +
     breakdown.penalties
+
+  // LIMITE DE PERDA: Perdedores nunca perdem mais de -30 MMR (exceto forfeit)
+  if (!player.didWin) {
+    // Se tem penalty de FORFEIT (-25), permitir até -50 (forfeit grave)
+    const hasForfeitPenalty = breakdown.penalties <= -20
+    const maxLoss = hasForfeitPenalty ? -50 : -30
+    componentsTotal = Math.max(componentsTotal, maxLoss)
+  }
 
   const oldTier = player.state.rankTier
   const oldPoints = player.state.rankPoints
