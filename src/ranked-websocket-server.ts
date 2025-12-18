@@ -9,6 +9,7 @@ import { ValidationManager } from './managers/validation-manager';
 import { LobbyManager } from './managers/lobby-manager';
 import { FriendManager } from './managers/friend-manager';
 import { PartyManager } from './managers/party-manager';
+import { QuartetManager } from './managers/quartet-manager';
 import { QueuePlayer, ReadyPlayer } from './types';
 import { DiscordService } from './services/discord-service';
 import { prismaRanked, prismaGame } from './database/prisma';
@@ -94,6 +95,7 @@ export class RankedWebSocketServer {
   private lobbyManager: LobbyManager;
   private friendManager: FriendManager;
   private partyManager: PartyManager;
+  private quartetManager: QuartetManager;
 
   // Servidor HTTP e App Express
   private app: express.Express;         // <-- ADICIONADO
@@ -169,6 +171,7 @@ export class RankedWebSocketServer {
     this.lobbyManager = new LobbyManager();
     this.friendManager = new FriendManager();
     this.partyManager = new PartyManager();
+    this.quartetManager = new QuartetManager();
     this.validationManager = new ValidationManager({
       onMatchCompleted: async (matchId, result) => {
         log('debug', `✅ Match ${matchId} validado! Vencedor: ${result.winner}`);
@@ -932,6 +935,25 @@ this.readyManager.onReadyFailed(async (
           await this.handleFriendPending(ws);
           break;
 
+        case 'QUARTET_INVITE_SEND':
+          await this.handleQuartetInviteSend(ws, payload);
+          break;
+        case 'QUARTET_INVITE_ACCEPT':
+          await this.handleQuartetInviteAccept(ws, payload);
+          break;
+        case 'QUARTET_INVITE_REJECT':
+          await this.handleQuartetInviteReject(ws, payload);
+          break;
+        case 'QUARTET_INVITE_REMOVE':
+          await this.handleQuartetInviteRemove(ws, payload);
+          break;
+        case 'QUARTET_LIST_ACCEPTED':
+          await this.handleQuartetListAccepted(ws);
+          break;
+        case 'QUARTET_LIST_PENDING':
+          await this.handleQuartetListPending(ws);
+          break;
+
         case 'PARTY_CREATE':
           await this.handlePartyCreate(ws);
           break;
@@ -1604,6 +1626,106 @@ this.readyManager.onReadyFailed(async (
     if (!ws.oidUser) return;
     const pending = await this.friendManager.listPending(ws.oidUser);
     this.sendMessage(ws, { type: 'FRIEND_PENDING', payload: { pending } });
+  }
+
+  /**
+   * QUARTET HANDLERS - Gerenciamento de convites de quarteto
+   */
+  private async handleQuartetInviteSend(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const targetOidUser = await this.resolveTargetUserIdByNickname(payload);
+    if (!targetOidUser) {
+      return this.sendError(ws, 'TARGET_REQUIRED');
+    }
+
+    const rawTargetPos = Number(payload?.targetPos);
+    const targetPos = rawTargetPos === 1 || rawTargetPos === 2 || rawTargetPos === 3 ? rawTargetPos : null;
+
+    const result = await this.quartetManager.sendInvite(ws.oidUser, targetOidUser, targetPos);
+    if (!result.ok) {
+      return this.sendMessage(ws, { type: 'QUARTET_ERROR', payload: { reason: result.reason } });
+    }
+
+    this.sendMessage(ws, { type: 'QUARTET_INVITE_SENT', payload: { targetOidUser, targetPos } });
+
+    const targetClient = this.clients.get(targetOidUser);
+    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+      const requesterName = ws.username || (await this.getUsername(ws.oidUser));
+      this.sendMessage(targetClient, {
+        type: 'QUARTET_INVITE_REQUEST',
+        payload: { requesterOidUser: ws.oidUser, requesterName, targetPos }
+      });
+    }
+  }
+
+  private async handleQuartetInviteAccept(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const requesterOidUser = Number(payload?.requesterOidUser);
+    if (!requesterOidUser) {
+      return this.sendError(ws, 'REQUESTER_REQUIRED');
+    }
+    const result = await this.quartetManager.acceptInvite(requesterOidUser, ws.oidUser);
+    if (!result.ok) {
+      return this.sendMessage(ws, { type: 'QUARTET_ERROR', payload: { reason: result.reason } });
+    }
+
+    const selfName = ws.username || (await this.getUsername(ws.oidUser));
+    const requesterName = await this.getUsername(requesterOidUser);
+
+    this.sendMessage(ws, {
+      type: 'QUARTET_INVITE_ACCEPTED',
+      payload: { oidUser: requesterOidUser, username: requesterName }
+    });
+
+    const requesterClient = this.clients.get(requesterOidUser);
+    if (requesterClient && requesterClient.readyState === WebSocket.OPEN) {
+      this.sendMessage(requesterClient, {
+        type: 'QUARTET_INVITE_ACCEPTED',
+        payload: { oidUser: ws.oidUser, username: selfName }
+      });
+    }
+  }
+
+  private async handleQuartetInviteReject(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const requesterOidUser = Number(payload?.requesterOidUser);
+    if (!requesterOidUser) {
+      return this.sendError(ws, 'REQUESTER_REQUIRED');
+    }
+    const result = await this.quartetManager.rejectInvite(requesterOidUser, ws.oidUser);
+    if (!result.ok) {
+      return this.sendMessage(ws, { type: 'QUARTET_ERROR', payload: { reason: result.reason } });
+    }
+    this.sendMessage(ws, { type: 'QUARTET_INVITE_REJECTED', payload: { requesterOidUser } });
+  }
+
+  private async handleQuartetInviteRemove(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const targetOidUser = await this.resolveTargetUserId(payload);
+    if (!targetOidUser) {
+      return this.sendError(ws, 'TARGET_REQUIRED');
+    }
+    const result = await this.quartetManager.removeInvite(ws.oidUser, targetOidUser);
+    if (!result.ok) {
+      return this.sendMessage(ws, { type: 'QUARTET_ERROR', payload: { reason: result.reason } });
+    }
+    this.sendMessage(ws, { type: 'QUARTET_INVITE_REMOVED', payload: { oidUser: targetOidUser } });
+    const targetClient = this.clients.get(targetOidUser);
+    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+      this.sendMessage(targetClient, { type: 'QUARTET_INVITE_REMOVED', payload: { oidUser: ws.oidUser } });
+    }
+  }
+
+  private async handleQuartetListAccepted(ws: AuthenticatedWebSocket): Promise<void> {
+    if (!ws.oidUser) return;
+    const accepted = await this.quartetManager.listAcceptedInvites(ws.oidUser);
+    this.sendMessage(ws, { type: 'QUARTET_LIST_ACCEPTED', payload: { accepted } });
+  }
+
+  private async handleQuartetListPending(ws: AuthenticatedWebSocket): Promise<void> {
+    if (!ws.oidUser) return;
+    const pending = await this.quartetManager.listPendingInvites(ws.oidUser);
+    this.sendMessage(ws, { type: 'QUARTET_LIST_PENDING', payload: { pending } });
   }
 
   private async getUsername(oidUser: number): Promise<string> {
