@@ -25,6 +25,13 @@ interface MoveResult {
   channelId?: string
 }
 
+function normalizeSnowflakeId(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (!/^\d{17,20}$/.test(trimmed)) return null
+  return trimmed
+}
+
 export class DiscordService {
   private redis = getRedisClient()
   private botToken: string
@@ -139,8 +146,16 @@ export class DiscordService {
     const denyViewConnect = (VIEW | CONNECT).toString()
 
     const buildOverwrites = (team: TeamKey) => {
-      const allowed = (teamMembers?.[team] || []).filter(Boolean)
-      if (!allowed.length) return undefined
+      if (!teamMembers) return undefined
+
+      const rawAllowed = (teamMembers[team] || []).filter(Boolean)
+      const allowed = Array.from(
+        new Set(
+          rawAllowed
+            .map((id) => normalizeSnowflakeId(id))
+            .filter((id): id is string => Boolean(id))
+        )
+      )
 
       const overwrites: Array<{ id: string; type: 0 | 1; allow?: string; deny?: string }> = []
 
@@ -149,6 +164,12 @@ export class DiscordService {
           id: this.guildId,
           type: 0, // @everyone role
           deny: denyViewConnect
+        })
+      }
+
+      if (rawAllowed.length > 0 && allowed.length === 0) {
+        log('warn', `Discord channel permissions ignoradas (IDs inválidos) para ${matchId}/${team}`, {
+          rawAllowedCount: rawAllowed.length
         })
       }
 
@@ -205,6 +226,11 @@ export class DiscordService {
     if (!this.isEnabled()) return { ok: false, reason: 'SERVICE_DISABLED' }
     if (!discordUserId) return { ok: false, reason: 'MISSING_DISCORD_ID' }
 
+    const normalizedDiscordUserId = normalizeSnowflakeId(discordUserId)
+    if (!normalizedDiscordUserId) {
+      return { ok: false, reason: 'INVALID_DISCORD_ID' }
+    }
+
     const roomId = await this.resolveRoomId(matchId)
     if (!roomId) return { ok: false, reason: 'ROOM_ID_MISSING' }
 
@@ -214,12 +240,12 @@ export class DiscordService {
 
     if (!channelId) return { ok: false, reason: 'CHANNEL_NOT_FOUND' }
 
-    const voiceState = await this.getVoiceState(discordUserId)
+    const voiceState = await this.getVoiceState(normalizedDiscordUserId)
     if (voiceState === null) {
       return { ok: false, reason: 'NOT_IN_VOICE' }
     }
 
-    const moveResult = await this.discordRequest(`/guilds/${this.guildId}/members/${discordUserId}`, {
+    const moveResult = await this.discordRequest(`/guilds/${this.guildId}/members/${normalizedDiscordUserId}`, {
       method: 'PATCH',
       body: JSON.stringify({ channel_id: channelId })
     })
