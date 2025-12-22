@@ -1639,7 +1639,16 @@ this.readyManager.onReadyFailed(async (
     }
 
     const rawTargetPos = Number(payload?.targetPos);
-    const targetPos = rawTargetPos === 1 || rawTargetPos === 2 || rawTargetPos === 3 ? rawTargetPos : null;
+
+    // Validação: targetPos é OBRIGATÓRIO e deve ser 1, 2 ou 3
+    if (rawTargetPos !== 1 && rawTargetPos !== 2 && rawTargetPos !== 3) {
+      return this.sendMessage(ws, {
+        type: 'QUARTET_ERROR',
+        payload: { reason: 'INVALID_POSITION' }
+      });
+    }
+
+    const targetPos = rawTargetPos as 1 | 2 | 3;
 
     const result = await this.quartetManager.sendInvite(ws.oidUser, targetOidUser, targetPos);
     if (!result.ok) {

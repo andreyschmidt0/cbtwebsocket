@@ -60,17 +60,23 @@ export class QuartetManager {
 
   /**
    * Envia convite para formar quarteto
+   * @param targetPos - Posição OBRIGATÓRIA no quarteto (1, 2 ou 3)
    */
   async sendInvite(
     requesterOidUser: number,
     targetOidUser: number,
-    targetPos?: number | null
+    targetPos: 1 | 2 | 3
   ): Promise<{ ok: boolean; reason?: string }> {
     if (!requesterOidUser || !targetOidUser || requesterOidUser === targetOidUser) {
       return { ok: false, reason: 'INVALID_TARGET' }
     }
 
-    const normalizedTargetPos = targetPos === 1 || targetPos === 2 || targetPos === 3 ? targetPos : null
+    // Validação: targetPos é obrigatório e deve ser 1, 2 ou 3
+    if (targetPos !== 1 && targetPos !== 2 && targetPos !== 3) {
+      return { ok: false, reason: 'INVALID_POSITION' }
+    }
+
+    const normalizedTargetPos = targetPos
 
     try {
       // Verifica se já existe algum convite entre os dois (em qualquer direção)
