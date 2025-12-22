@@ -229,14 +229,14 @@ export class QuartetManager {
   }
 
   /**
-   * Remove convite de quarteto
+   * Remove convite de quarteto (aceitos ou pendentes)
    */
   async removeInvite(userA: number, userB: number): Promise<{ ok: boolean; reason?: string }> {
     try {
       const updated = await prismaRanked.$executeRaw`
         UPDATE BST_QuartetInvites
         SET status = 'REMOVED', updatedAt = GETDATE()
-        WHERE status = 'ACCEPTED' AND (
+        WHERE status IN ('ACCEPTED', 'PENDING') AND (
           (requesterOidUser = ${userA} AND targetOidUser = ${userB}) OR
           (requesterOidUser = ${userB} AND targetOidUser = ${userA})
         )
