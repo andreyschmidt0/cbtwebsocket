@@ -1737,15 +1737,31 @@ this.readyManager.onReadyFailed(async (
     this.sendMessage(ws, { type: 'QUARTET_LIST_PENDING', payload: { pending } });
   }
 
+  /**
+   * Obtém o username de um jogador
+   * IMPORTANTE: Sempre retorna um username válido (nunca null/undefined)
+   * Se não encontrado, retorna fallback "Player{oidUser}"
+   */
   private async getUsername(oidUser: number): Promise<string> {
     const client = this.clients.get(oidUser);
-    if (client?.username) return client.username;
+    if (client?.username && client.username.trim().length > 0) {
+      return client.username.trim();
+    }
+
     try {
       const row = await prismaGame.$queryRaw<any[]>`
-        SELECT TOP 1 NickName FROM CBT_User WHERE oiduser = ${oidUser}
+        SELECT TOP 1 NickName FROM CBT_User WHERE oiduser = ${oidUser} AND NickName IS NOT NULL
       `;
-      if (row && row[0]?.NickName) return row[0].NickName;
-    } catch {}
+
+      const nickname = row?.[0]?.NickName;
+      if (nickname && typeof nickname === 'string' && nickname.trim().length > 0) {
+        return nickname.trim();
+      }
+    } catch (err) {
+      log('warn', `Erro ao buscar username para oidUser ${oidUser}`, err);
+    }
+
+    // Fallback quando username não é encontrado ou é inválido
     return `Player${oidUser}`;
   }
 

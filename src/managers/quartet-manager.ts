@@ -12,12 +12,16 @@ export interface QuartetInviteRecord {
   updatedAt: Date
 }
 
+/**
+ * Visão de convite de quarteto
+ * IMPORTANTE: Todos os campos são obrigatórios para garantir integridade dos dados
+ */
 export interface QuartetInviteView {
   oidUser: number
-  username: string | null
+  username: string // OBRIGATÓRIO - nunca deve ser null
   status: QuartetInviteStatus
   isRequester: boolean
-  targetPos: number | null
+  targetPos: number // OBRIGATÓRIO - deve ser 1, 2 ou 3
 }
 
 export interface QuartetInfo {
@@ -257,6 +261,7 @@ export class QuartetManager {
 
   /**
    * Lista todos os convites aceitos (membros do quarteto potencial)
+   * IMPORTANTE: Apenas retorna convites com dados completos (username e targetPos válidos)
    */
   async listAcceptedInvites(oidUser: number): Promise<QuartetInviteView[]> {
     try {
@@ -268,26 +273,42 @@ export class QuartetManager {
       }[]>`
         SELECT requesterOidUser, targetOidUser, status, targetPos
         FROM BST_QuartetInvites
-        WHERE status = 'ACCEPTED' AND (requesterOidUser = ${oidUser} OR targetOidUser = ${oidUser})
+        WHERE status = 'ACCEPTED'
+          AND (requesterOidUser = ${oidUser} OR targetOidUser = ${oidUser})
+          AND targetPos IS NOT NULL
+          AND targetPos IN (1, 2, 3)
       `
+
       const ids = Array.from(new Set(rows.map(r => (r.requesterOidUser === oidUser ? r.targetOidUser : r.requesterOidUser))))
       const users =
         ids.length > 0
           ? await prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-              `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')})`
+              `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')}) AND NickName IS NOT NULL`
             )
           : []
-      const nameById = new Map<number, string | null>(users.map(u => [u.oiduser, u.NickName]))
-      return rows.map(r => {
-        const memberId = r.requesterOidUser === oidUser ? r.targetOidUser : r.requesterOidUser
-        return {
-          oidUser: memberId,
-          username: nameById.get(memberId) ?? null,
-          status: r.status,
-          isRequester: r.requesterOidUser === oidUser,
-          targetPos: r.targetPos ?? null
-        }
-      })
+
+      const nameById = new Map<number, string>(
+        users
+          .filter(u => u.NickName && u.NickName.trim().length > 0)
+          .map(u => [u.oiduser, u.NickName!.trim()])
+      )
+
+      // Apenas retornar convites com username E targetPos válidos
+      return rows
+        .filter(r => {
+          const memberId = r.requesterOidUser === oidUser ? r.targetOidUser : r.requesterOidUser
+          return nameById.has(memberId) && r.targetPos !== null
+        })
+        .map(r => {
+          const memberId = r.requesterOidUser === oidUser ? r.targetOidUser : r.requesterOidUser
+          return {
+            oidUser: memberId,
+            username: nameById.get(memberId)!,
+            status: r.status,
+            isRequester: r.requesterOidUser === oidUser,
+            targetPos: r.targetPos!
+          }
+        })
     } catch (err) {
       log('error', 'Erro ao listar membros do quarteto', err)
       return []
@@ -296,6 +317,7 @@ export class QuartetManager {
 
   /**
    * Lista convites pendentes (recebidos e enviados)
+   * IMPORTANTE: Apenas retorna convites com dados completos (username e targetPos válidos)
    */
   async listPendingInvites(oidUser: number): Promise<QuartetInviteView[]> {
     try {
@@ -307,28 +329,44 @@ export class QuartetManager {
       }[]>`
         SELECT requesterOidUser, targetOidUser, status, targetPos
         FROM BST_QuartetInvites
-        WHERE status = 'PENDING' AND (targetOidUser = ${oidUser} OR requesterOidUser = ${oidUser})
+        WHERE status = 'PENDING'
+          AND (targetOidUser = ${oidUser} OR requesterOidUser = ${oidUser})
+          AND targetPos IS NOT NULL
+          AND targetPos IN (1, 2, 3)
       `
+
       const ids = Array.from(
         new Set(rows.map(r => (r.requesterOidUser === oidUser ? r.targetOidUser : r.requesterOidUser)))
       )
       const users =
         ids.length > 0
           ? await prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-              `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')})`
+              `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')}) AND NickName IS NOT NULL`
             )
           : []
-      const nameById = new Map<number, string | null>(users.map(u => [u.oiduser, u.NickName]))
-      return rows.map(r => {
-        const otherUserId = r.requesterOidUser === oidUser ? r.targetOidUser : r.requesterOidUser
-        return {
-          oidUser: otherUserId,
-          username: nameById.get(otherUserId) ?? null,
-          status: r.status,
-          isRequester: r.requesterOidUser === oidUser,
-          targetPos: r.targetPos ?? null
-        }
-      })
+
+      const nameById = new Map<number, string>(
+        users
+          .filter(u => u.NickName && u.NickName.trim().length > 0)
+          .map(u => [u.oiduser, u.NickName!.trim()])
+      )
+
+      // Apenas retornar convites com username E targetPos válidos
+      return rows
+        .filter(r => {
+          const otherUserId = r.requesterOidUser === oidUser ? r.targetOidUser : r.requesterOidUser
+          return nameById.has(otherUserId) && r.targetPos !== null
+        })
+        .map(r => {
+          const otherUserId = r.requesterOidUser === oidUser ? r.targetOidUser : r.requesterOidUser
+          return {
+            oidUser: otherUserId,
+            username: nameById.get(otherUserId)!,
+            status: r.status,
+            isRequester: r.requesterOidUser === oidUser,
+            targetPos: r.targetPos!
+          }
+        })
     } catch (err) {
       log('error', 'Erro ao listar convites pendentes', err)
       return []
