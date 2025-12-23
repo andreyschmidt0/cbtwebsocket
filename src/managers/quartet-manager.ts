@@ -243,16 +243,28 @@ export class QuartetManager {
    */
   async removeInvite(userA: number, userB: number): Promise<{ ok: boolean; reason?: string }> {
     try {
+      // Segurança: apenas o REQUESTER (capitão) pode remover convites aceitos/pendentes.
       const updated = await prismaRanked.$executeRaw`
         UPDATE BST_QuartetInvites
         SET status = 'REMOVED', updatedAt = GETDATE()
+        WHERE status IN ('ACCEPTED', 'PENDING')
+          AND requesterOidUser = ${userA}
+          AND targetOidUser = ${userB}
+      `
+
+      if (updated) return { ok: true }
+
+      // Se existe convite entre os 2, mas o requester não é o userA, bloqueia.
+      const existsBetween = await prismaRanked.$queryRaw<{ ok: number }[]>`
+        SELECT TOP 1 1 AS ok
+        FROM BST_QuartetInvites
         WHERE status IN ('ACCEPTED', 'PENDING') AND (
           (requesterOidUser = ${userA} AND targetOidUser = ${userB}) OR
           (requesterOidUser = ${userB} AND targetOidUser = ${userA})
         )
       `
-      if (!updated) return { ok: false, reason: 'NOT_FOUND' }
-      return { ok: true }
+      if (existsBetween.length > 0) return { ok: false, reason: 'NOT_REQUESTER' }
+      return { ok: false, reason: 'NOT_FOUND' }
     } catch (err) {
       log('error', 'Erro ao remover convite de quarteto', err)
       return { ok: false, reason: 'INTERNAL_ERROR' }
