@@ -22,6 +22,7 @@ export interface QuartetInviteView {
   status: QuartetInviteStatus
   isRequester: boolean
   targetPos: number // OBRIGATÓRIO - deve ser 1, 2 ou 3
+  isCaptain?: boolean // OPCIONAL - true se o membro é o capitão do quarteto criado
 }
 
 export interface QuartetInfo {
@@ -273,10 +274,81 @@ export class QuartetManager {
 
   /**
    * Lista todos os convites aceitos (membros do quarteto potencial)
-   * IMPORTANTE: Apenas retorna convites com dados completos (username e targetPos válidos)
+   * IMPORTANTE: Prioriza quartetos criados em BST_EventQuartet. Se não houver, retorna convites aceitos.
    */
   async listAcceptedInvites(oidUser: number): Promise<QuartetInviteView[]> {
     try {
+      // PASSO 1: Verificar se o usuário tem um quarteto ativo em BST_EventQuartetMember
+      const activeQuartet = await prismaGame.$queryRaw<{
+        QuartetID: number
+        CaptainOidUser: number
+        Name: string | null
+      }[]>`
+        SELECT TOP 1 q.QuartetID, q.CaptainOidUser, q.Name
+        FROM dbo.BST_EventQuartet q
+        INNER JOIN dbo.BST_EventQuartetMember m
+          ON m.QuartetID = q.QuartetID
+        WHERE m.oidUser = ${oidUser}
+        ORDER BY q.CreatedAt DESC
+      `
+
+      // Se o usuário tem um quarteto ativo, carregar todos os membros desse quarteto
+      if (activeQuartet.length > 0) {
+        const quartet = activeQuartet[0]
+        const quartetId = Number(quartet.QuartetID)
+        const captainOidUser = Number(quartet.CaptainOidUser)
+
+        // Buscar todos os membros do quarteto
+        const members = await prismaGame.$queryRaw<{
+          oidUser: number
+          Role: string
+        }[]>`
+          SELECT oidUser, Role
+          FROM dbo.BST_EventQuartetMember
+          WHERE QuartetID = ${quartetId}
+            AND oidUser <> ${oidUser}
+        `
+
+        // Pegar todos os oidUsers (exceto o próprio usuário que está consultando)
+        const memberIds = members.map(m => Number(m.oidUser))
+
+        if (memberIds.length === 0) {
+          return []
+        }
+
+        // Buscar usernames de todos os membros
+        const users = await prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
+          `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${memberIds.join(',')}) AND NickName IS NOT NULL`
+        )
+
+        const nameById = new Map<number, string>(
+          users
+            .filter(u => u.NickName && u.NickName.trim().length > 0)
+            .map(u => [u.oiduser, u.NickName!.trim()])
+        )
+
+        // Mapear membros para o formato QuartetInviteView
+        // Para quartetos criados, todos os membros aparecem com seus respectivos índices
+        let memberIndex = 1
+        return members
+          .filter(m => nameById.has(Number(m.oidUser)))
+          .map(m => {
+            const memberId = Number(m.oidUser)
+            const isCaptain = m.Role === 'CAPTAIN'
+            const pos = memberIndex++
+
+            return {
+              oidUser: memberId,
+              username: nameById.get(memberId)!,
+              status: 'ACCEPTED' as QuartetInviteStatus,
+              isRequester: oidUser === captainOidUser, // Se eu sou o capitão, então eu sou o requester
+              targetPos: Math.min(pos, 3) as 1 | 2 | 3,
+              isCaptain: isCaptain // Identifica se este membro é o capitão
+            }
+          })
+      }
+
+      // PASSO 2: Se não há quarteto ativo, retornar convites aceitos de BST_QuartetInvites (lógica antiga)
       const rows = await prismaRanked.$queryRaw<{
         requesterOidUser: number
         targetOidUser: number
