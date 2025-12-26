@@ -1617,15 +1617,35 @@ this.readyManager.onReadyFailed(async (
   }
 
   private async handleFriendList(ws: AuthenticatedWebSocket): Promise<void> {
-    if (!ws.oidUser) return;
-    const friends = await this.friendManager.listFriends(ws.oidUser);
-    this.sendMessage(ws, { type: 'FRIEND_LIST', payload: { friends } });
+    if (!ws.oidUser) {
+      return this.sendMessage(ws, {
+        type: 'FRIEND_ERROR',
+        payload: { reason: 'NOT_AUTHENTICATED' }
+      });
+    }
+    try {
+      const friends = await this.friendManager.listFriends(ws.oidUser);
+      this.sendMessage(ws, { type: 'FRIEND_LIST', payload: { friends } });
+    } catch (err) {
+      const reason = (err as Error).message === 'DATABASE_TIMEOUT' ? 'DATABASE_TIMEOUT' : 'INTERNAL_ERROR';
+      this.sendMessage(ws, { type: 'FRIEND_ERROR', payload: { reason } });
+    }
   }
 
   private async handleFriendPending(ws: AuthenticatedWebSocket): Promise<void> {
-    if (!ws.oidUser) return;
-    const pending = await this.friendManager.listPending(ws.oidUser);
-    this.sendMessage(ws, { type: 'FRIEND_PENDING', payload: { pending } });
+    if (!ws.oidUser) {
+      return this.sendMessage(ws, {
+        type: 'FRIEND_ERROR',
+        payload: { reason: 'NOT_AUTHENTICATED' }
+      });
+    }
+    try {
+      const pending = await this.friendManager.listPending(ws.oidUser);
+      this.sendMessage(ws, { type: 'FRIEND_PENDING', payload: { pending } });
+    } catch (err) {
+      const reason = (err as Error).message === 'DATABASE_TIMEOUT' ? 'DATABASE_TIMEOUT' : 'INTERNAL_ERROR';
+      this.sendMessage(ws, { type: 'FRIEND_ERROR', payload: { reason } });
+    }
   }
 
   /**
@@ -1726,15 +1746,35 @@ this.readyManager.onReadyFailed(async (
   }
 
   private async handleQuartetListAccepted(ws: AuthenticatedWebSocket): Promise<void> {
-    if (!ws.oidUser) return;
-    const accepted = await this.quartetManager.listAcceptedInvites(ws.oidUser);
-    this.sendMessage(ws, { type: 'QUARTET_LIST_ACCEPTED', payload: { accepted } });
+    if (!ws.oidUser) {
+      return this.sendMessage(ws, {
+        type: 'QUARTET_ERROR',
+        payload: { reason: 'NOT_AUTHENTICATED' }
+      });
+    }
+    try {
+      const accepted = await this.quartetManager.listAcceptedInvites(ws.oidUser);
+      this.sendMessage(ws, { type: 'QUARTET_LIST_ACCEPTED', payload: { accepted } });
+    } catch (err) {
+      const reason = (err as Error).message === 'DATABASE_TIMEOUT' ? 'DATABASE_TIMEOUT' : 'INTERNAL_ERROR';
+      this.sendMessage(ws, { type: 'QUARTET_ERROR', payload: { reason } });
+    }
   }
 
   private async handleQuartetListPending(ws: AuthenticatedWebSocket): Promise<void> {
-    if (!ws.oidUser) return;
-    const pending = await this.quartetManager.listPendingInvites(ws.oidUser);
-    this.sendMessage(ws, { type: 'QUARTET_LIST_PENDING', payload: { pending } });
+    if (!ws.oidUser) {
+      return this.sendMessage(ws, {
+        type: 'QUARTET_ERROR',
+        payload: { reason: 'NOT_AUTHENTICATED' }
+      });
+    }
+    try {
+      const pending = await this.quartetManager.listPendingInvites(ws.oidUser);
+      this.sendMessage(ws, { type: 'QUARTET_LIST_PENDING', payload: { pending } });
+    } catch (err) {
+      const reason = (err as Error).message === 'DATABASE_TIMEOUT' ? 'DATABASE_TIMEOUT' : 'INTERNAL_ERROR';
+      this.sendMessage(ws, { type: 'QUARTET_ERROR', payload: { reason } });
+    }
   }
 
   /**

@@ -1,6 +1,19 @@
 import { prismaRanked, prismaGame } from '../database/prisma'
 import { log } from '../utils/logger'
 
+/**
+ * Wrapper para adicionar timeout em queries do Prisma
+ * Previne que queries penduradas causem loading infinito
+ */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 5000): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error('DATABASE_TIMEOUT')), timeoutMs)
+    )
+  ])
+}
+
 type QuartetInviteStatus = 'PENDING' | 'ACCEPTED' | 'REJECTED' | 'REMOVED'
 
 export interface QuartetInviteRecord {
@@ -279,18 +292,20 @@ export class QuartetManager {
   async listAcceptedInvites(oidUser: number): Promise<QuartetInviteView[]> {
     try {
       // PASSO 1: Verificar se o usuário tem um quarteto ativo em BST_EventQuartetMember
-      const activeQuartet = await prismaGame.$queryRaw<{
-        QuartetID: number
-        CaptainOidUser: number
-        Name: string | null
-      }[]>`
-        SELECT TOP 1 q.QuartetID, q.CaptainOidUser, q.Name
-        FROM dbo.BST_EventQuartet q
-        INNER JOIN dbo.BST_EventQuartetMember m
-          ON m.QuartetID = q.QuartetID
-        WHERE m.oidUser = ${oidUser}
-        ORDER BY q.CreatedAt DESC
-      `
+      const activeQuartet = await withTimeout(
+        prismaGame.$queryRaw<{
+          QuartetID: number
+          CaptainOidUser: number
+          Name: string | null
+        }[]>`
+          SELECT TOP 1 q.QuartetID, q.CaptainOidUser, q.Name
+          FROM dbo.BST_EventQuartet q
+          INNER JOIN dbo.BST_EventQuartetMember m
+            ON m.QuartetID = q.QuartetID
+          WHERE m.oidUser = ${oidUser}
+          ORDER BY q.CreatedAt DESC
+        `
+      )
 
       // Se o usuário tem um quarteto ativo, carregar todos os membros desse quarteto
       if (activeQuartet.length > 0) {
@@ -299,15 +314,17 @@ export class QuartetManager {
         const captainOidUser = Number(quartet.CaptainOidUser)
 
         // Buscar todos os membros do quarteto
-        const members = await prismaGame.$queryRaw<{
-          oidUser: number
-          Role: string
-        }[]>`
-          SELECT oidUser, Role
-          FROM dbo.BST_EventQuartetMember
-          WHERE QuartetID = ${quartetId}
-            AND oidUser <> ${oidUser}
-        `
+        const members = await withTimeout(
+          prismaGame.$queryRaw<{
+            oidUser: number
+            Role: string
+          }[]>`
+            SELECT oidUser, Role
+            FROM dbo.BST_EventQuartetMember
+            WHERE QuartetID = ${quartetId}
+              AND oidUser <> ${oidUser}
+          `
+        )
 
         // Pegar todos os oidUsers (exceto o próprio usuário que está consultando)
         const memberIds = members.map(m => Number(m.oidUser))
@@ -317,8 +334,10 @@ export class QuartetManager {
         }
 
         // Buscar usernames de todos os membros
-        const users = await prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-          `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${memberIds.join(',')}) AND NickName IS NOT NULL`
+        const users = await withTimeout(
+          prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
+            `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${memberIds.join(',')}) AND NickName IS NOT NULL`
+          )
         )
 
         const nameById = new Map<number, string>(
@@ -349,25 +368,29 @@ export class QuartetManager {
       }
 
       // PASSO 2: Se não há quarteto ativo, retornar convites aceitos de BST_QuartetInvites (lógica antiga)
-      const rows = await prismaRanked.$queryRaw<{
-        requesterOidUser: number
-        targetOidUser: number
-        status: QuartetInviteStatus
-        targetPos: number | null
-      }[]>`
-        SELECT requesterOidUser, targetOidUser, status, targetPos
-        FROM BST_QuartetInvites
-        WHERE status = 'ACCEPTED'
-          AND (requesterOidUser = ${oidUser} OR targetOidUser = ${oidUser})
-          AND targetPos IS NOT NULL
-          AND targetPos IN (1, 2, 3)
-      `
+      const rows = await withTimeout(
+        prismaRanked.$queryRaw<{
+          requesterOidUser: number
+          targetOidUser: number
+          status: QuartetInviteStatus
+          targetPos: number | null
+        }[]>`
+          SELECT requesterOidUser, targetOidUser, status, targetPos
+          FROM BST_QuartetInvites
+          WHERE status = 'ACCEPTED'
+            AND (requesterOidUser = ${oidUser} OR targetOidUser = ${oidUser})
+            AND targetPos IS NOT NULL
+            AND targetPos IN (1, 2, 3)
+        `
+      )
 
       const ids = Array.from(new Set(rows.map(r => (r.requesterOidUser === oidUser ? r.targetOidUser : r.requesterOidUser))))
       const users =
         ids.length > 0
-          ? await prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-              `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')}) AND NickName IS NOT NULL`
+          ? await withTimeout(
+              prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
+                `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')}) AND NickName IS NOT NULL`
+              )
             )
           : []
 
@@ -395,7 +418,7 @@ export class QuartetManager {
         })
     } catch (err) {
       log('error', 'Erro ao listar membros do quarteto', err)
-      return []
+      throw err // Re-throw para o handler enviar erro ao cliente
     }
   }
 
@@ -405,27 +428,31 @@ export class QuartetManager {
    */
   async listPendingInvites(oidUser: number): Promise<QuartetInviteView[]> {
     try {
-      const rows = await prismaRanked.$queryRaw<{
-        requesterOidUser: number
-        targetOidUser: number
-        status: QuartetInviteStatus
-        targetPos: number | null
-      }[]>`
-        SELECT requesterOidUser, targetOidUser, status, targetPos
-        FROM BST_QuartetInvites
-        WHERE status = 'PENDING'
-          AND (targetOidUser = ${oidUser} OR requesterOidUser = ${oidUser})
-          AND targetPos IS NOT NULL
-          AND targetPos IN (1, 2, 3)
-      `
+      const rows = await withTimeout(
+        prismaRanked.$queryRaw<{
+          requesterOidUser: number
+          targetOidUser: number
+          status: QuartetInviteStatus
+          targetPos: number | null
+        }[]>`
+          SELECT requesterOidUser, targetOidUser, status, targetPos
+          FROM BST_QuartetInvites
+          WHERE status = 'PENDING'
+            AND (targetOidUser = ${oidUser} OR requesterOidUser = ${oidUser})
+            AND targetPos IS NOT NULL
+            AND targetPos IN (1, 2, 3)
+        `
+      )
 
       const ids = Array.from(
         new Set(rows.map(r => (r.requesterOidUser === oidUser ? r.targetOidUser : r.requesterOidUser)))
       )
       const users =
         ids.length > 0
-          ? await prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-              `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')}) AND NickName IS NOT NULL`
+          ? await withTimeout(
+              prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
+                `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')}) AND NickName IS NOT NULL`
+              )
             )
           : []
 
@@ -453,7 +480,7 @@ export class QuartetManager {
         })
     } catch (err) {
       log('error', 'Erro ao listar convites pendentes', err)
-      return []
+      throw err // Re-throw para o handler enviar erro ao cliente
     }
   }
 

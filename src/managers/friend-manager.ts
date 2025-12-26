@@ -3,6 +3,19 @@ import { log } from '../utils/logger'
 
 type FriendStatus = 'PENDING' | 'ACCEPTED' | 'REMOVED' | 'BLOCKED'
 
+/**
+ * Wrapper para adicionar timeout em queries do Prisma
+ * Previne que queries penduradas causem loading infinito
+ */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 5000): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error('DATABASE_TIMEOUT')), timeoutMs)
+    )
+  ])
+}
+
 export interface FriendRecord {
   requesterId: number
   targetId: number
@@ -129,16 +142,20 @@ export class FriendManager {
 
   async listFriends(oidUser: number): Promise<FriendView[]> {
     try {
-      const rows = await prismaRanked.$queryRaw<{ requesterId: number; targetId: number; status: FriendStatus }[]>`
-        SELECT requesterId, targetId, status
-        FROM BST_Friends
-        WHERE status = 'ACCEPTED' AND (requesterId = ${oidUser} OR targetId = ${oidUser})
-      `
+      const rows = await withTimeout(
+        prismaRanked.$queryRaw<{ requesterId: number; targetId: number; status: FriendStatus }[]>`
+          SELECT requesterId, targetId, status
+          FROM BST_Friends
+          WHERE status = 'ACCEPTED' AND (requesterId = ${oidUser} OR targetId = ${oidUser})
+        `
+      )
       const ids = Array.from(new Set(rows.map(r => (r.requesterId === oidUser ? r.targetId : r.requesterId))))
       const users =
         ids.length > 0
-          ? await prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-              `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')})`
+          ? await withTimeout(
+              prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
+                `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')})`
+              )
             )
           : []
       const nameById = new Map<number, string | null>(users.map(u => [u.oiduser, u.NickName]))
@@ -153,24 +170,28 @@ export class FriendManager {
       })
     } catch (err) {
       log('error', 'Erro ao listar amigos', err)
-      return []
+      throw err // Re-throw para o handler enviar erro ao cliente
     }
   }
 
   async listPending(oidUser: number): Promise<FriendView[]> {
     try {
-      const rows = await prismaRanked.$queryRaw<{ requesterId: number; targetId: number; status: FriendStatus }[]>`
-        SELECT requesterId, targetId, status
-        FROM BST_Friends
-        WHERE status = 'PENDING' AND (targetId = ${oidUser} OR requesterId = ${oidUser})
-      `
+      const rows = await withTimeout(
+        prismaRanked.$queryRaw<{ requesterId: number; targetId: number; status: FriendStatus }[]>`
+          SELECT requesterId, targetId, status
+          FROM BST_Friends
+          WHERE status = 'PENDING' AND (targetId = ${oidUser} OR requesterId = ${oidUser})
+        `
+      )
       const ids = Array.from(
         new Set(rows.map(r => (r.requesterId === oidUser ? r.targetId : r.requesterId)))
       )
       const users =
         ids.length > 0
-          ? await prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-              `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')})`
+          ? await withTimeout(
+              prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
+                `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')})`
+              )
             )
           : []
       const nameById = new Map<number, string | null>(users.map(u => [u.oiduser, u.NickName]))
@@ -185,7 +206,7 @@ export class FriendManager {
       })
     } catch (err) {
       log('error', 'Erro ao listar pendentes', err)
-      return []
+      throw err // Re-throw para o handler enviar erro ao cliente
     }
   }
 }
