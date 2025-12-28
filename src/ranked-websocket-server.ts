@@ -1461,6 +1461,18 @@ this.readyManager.onReadyFailed(async (
       ...lobby.teams.BRAVO.map(p => p.oidUser)
     ];
 
+    // NOVO: Notifica todos os jogadores sobre a troca completada (para limpar animações)
+    for (const oid of allPlayerIds) {
+      this.sendToPlayer(oid, {
+        type: 'LOBBY_SWAP_COMPLETED',
+        payload: {
+          matchId,
+          swappedPlayers: [accepterOidUser, requestingOidUser]
+        }
+      });
+    }
+
+    // Re-sincroniza o estado da lobby para todos
     for (const oid of allPlayerIds) {
       const client = this.clients.get(oid);
       if (client && client.readyState === WebSocket.OPEN) {
