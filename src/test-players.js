@@ -9,15 +9,17 @@ const WS_URL = 'ws://localhost:3001'; // Altere para o endpoint do seu servidor
 function gerarClasse(i) {
   // Lista de 8 loadouts específicos para garantir 2 de cada T1-T4
   const loadouts = [
-    { primary: 'T2', secondary: 'SMG' },    // Bot 1
     { primary: 'T1', secondary: 'T2' },    // Bot 2
     { primary: 'T1', secondary: 'SMG' },    // Bot 3
+    { primary: 'T2', secondary: 'SMG' },    // Bot 1
     { primary: 'T2', secondary: 'T1' },    // Bot 4
     { primary: 'T3', secondary: 'SMG' },    // Bot 5
     { primary: 'T3', secondary: 'T4' },    // Bot 6
     { primary: 'T4', secondary: 'T3' },    // Bot 7
-    { primary: 'T4', secondary: 'SMG' },
-    { primary: 'SNIPER', secondary: 'SMG' }    // Bot 8
+    { primary: 'T4', secondary: 'SMG' },    // Bot 8
+    { primary: 'SNIPER', secondary: 'SMG' },
+                                            // Bot 9
+
   ];
 
   // Retorna o loadout específico para este bot (i-1 pois o loop começa em 1)

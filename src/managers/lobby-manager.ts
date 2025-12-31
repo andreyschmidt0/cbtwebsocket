@@ -60,7 +60,7 @@ export class LobbyManager {
   // Callbacks
   private onMapSelectedCallback?: (matchId: string, mapId: string) => void
   private onChatMessageCallback?: (matchId: string, username: string, message: string) => void
-  private onVetoUpdateCallback?: (matchId: string, lobby: LobbyState) => void
+  private onVetoUpdateCallback?: (matchId: string, lobby: LobbyState, changeType?: 'veto' | 'timer' | 'setup') => void
   private onTurnChangeCallback?: (matchId: string, newTurn: 'ALPHA' | 'BRAVO', timeRemaining: number) => void
 
   // Timers para veto
@@ -90,7 +90,7 @@ constructor() {
     this.onChatMessageCallback = callback
   }
 
-  onVetoUpdate(callback: (matchId: string, lobby: LobbyState) => void): void {
+  onVetoUpdate(callback: (matchId: string, lobby: LobbyState, changeType?: 'veto' | 'timer' | 'setup') => void): void {
     this.onVetoUpdateCallback = callback
   }
 
@@ -245,7 +245,7 @@ constructor() {
       currentLobby.timeRemaining -= 1
 
       if (this.onVetoUpdateCallback) {
-        this.onVetoUpdateCallback(matchId, currentLobby)
+        this.onVetoUpdateCallback(matchId, currentLobby, 'timer')
       }
 
       if (currentLobby.timeRemaining <= 0) {
@@ -260,7 +260,7 @@ constructor() {
         this.persistLobbyState(matchId, currentLobby).catch(() => { })
 
         if (this.onVetoUpdateCallback) {
-          this.onVetoUpdateCallback(matchId, currentLobby)
+          this.onVetoUpdateCallback(matchId, currentLobby, 'setup')
         }
         if (this.onTurnChangeCallback) {
           this.onTurnChangeCallback(matchId, currentLobby.currentTurn, currentLobby.timeRemaining)
@@ -302,7 +302,7 @@ constructor() {
 
       // Notifica sobre mudança de tempo (a cada segundo)
       if (this.onVetoUpdateCallback) {
-        this.onVetoUpdateCallback(matchId, currentLobby)
+        this.onVetoUpdateCallback(matchId, currentLobby, 'timer')
       }
 
       // Tempo esgotado - veto aleatório
@@ -540,7 +540,7 @@ async executeRoleSwap(
 
     // Notifica o frontend sobre a atualização (mapa vetado, etc.)
     if (this.onVetoUpdateCallback) {
-      this.onVetoUpdateCallback(matchId, lobby);
+      this.onVetoUpdateCallback(matchId, lobby, 'veto');
     }
 
     return true;

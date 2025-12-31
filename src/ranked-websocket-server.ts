@@ -1,7 +1,7 @@
 ﻿import { WebSocketServer, WebSocket } from 'ws';
-import express from 'express';         // <-- ADICIONADO
-import { createServer, Server as HttpServer } from 'http';   // <-- ADICIONADO
-import cors from 'cors';             // <-- ADICIONADO
+import express from 'express';
+import { createServer, Server as HttpServer } from 'http';
+import cors from 'cors';
 import { QueueManager } from './managers/queue-manager';
 import { ReadyManager } from './managers/ready-manager';
 import { HOSTManager } from './managers/host-manager';
@@ -656,22 +656,51 @@ this.readyManager.onReadyFailed(async (
     })
 
     // Callback quando houver atualização de veto
-    this.lobbyManager.onVetoUpdate((matchId, lobby) => {
+    this.lobbyManager.onVetoUpdate((matchId, lobby, changeType) => {
       const playerIds = [...lobby.teams.ALPHA, ...lobby.teams.BRAVO].map(p => p.oidUser)
 
-      // Notifica todos jogadores sobre atualização do veto
-      this.sendToPlayers(playerIds, {
-        type: 'VETO_UPDATE',
-        payload: {
-          matchId,
-          vetoedMaps: lobby.vetoedMaps,
-          vetoHistory: lobby.vetoHistory,
-          currentTurn: lobby.currentTurn,
-          timeRemaining: lobby.timeRemaining,
-          selectedMap: lobby.selectedMap,
-          status: lobby.status
-        }
-      })
+      // ✅ OTIMIZADO: Envia apenas dados incrementais baseado no tipo de mudança
+      if (changeType === 'veto') {
+        // Quando um veto acontece, envia apenas a última ação do veto (incremental)
+        const lastVeto = lobby.vetoHistory[lobby.vetoHistory.length - 1]
+        this.sendToPlayers(playerIds, {
+          type: 'VETO_UPDATE',
+          payload: {
+            matchId,
+            changeType: 'veto',
+            lastVeto, // Apenas a última ação
+            currentTurn: lobby.currentTurn,
+            timeRemaining: lobby.timeRemaining,
+            selectedMap: lobby.selectedMap,
+            status: lobby.status
+          }
+        })
+      } else if (changeType === 'timer') {
+        // Atualização de timer: envia apenas o tempo restante
+        this.sendToPlayers(playerIds, {
+          type: 'VETO_UPDATE',
+          payload: {
+            matchId,
+            changeType: 'timer',
+            timeRemaining: lobby.timeRemaining
+          }
+        })
+      } else {
+        // Setup ou outros: envia estado completo (usado na transição para fase de veto)
+        this.sendToPlayers(playerIds, {
+          type: 'VETO_UPDATE',
+          payload: {
+            matchId,
+            changeType: 'setup',
+            vetoedMaps: lobby.vetoedMaps,
+            vetoHistory: lobby.vetoHistory,
+            currentTurn: lobby.currentTurn,
+            timeRemaining: lobby.timeRemaining,
+            selectedMap: lobby.selectedMap,
+            status: lobby.status
+          }
+        })
+      }
     })
 
     // Callback quando mudar o turno
@@ -910,7 +939,11 @@ this.readyManager.onReadyFailed(async (
 		case 'LOBBY_ACCEPT_SWAP':
           await this.handleLobbyAcceptSwap(ws, payload)
           break
-		  
+
+		case 'LOBBY_DECLINE_SWAP':
+          await this.handleLobbyDeclineSwap(ws, payload)
+          break
+
         case 'LOBBY_ACCEPT_VOICE_TRANSFER':
         case 'REQUEST_DISCORD_MOVE':
           await this.handleDiscordMoveRequest(ws, payload);
@@ -1451,35 +1484,63 @@ this.readyManager.onReadyFailed(async (
       return;
     }
 
-    // 2. Após a troca, precisamos ATUALIZAR o estado de TODOS os jogadores no lobby.
-    // A forma mais fácil de re-sincronizar é forçar um 'LOBBY_JOIN' para todos.
+    // 2. Após a troca, precisamos ATUALIZAR o estado dos jogadores afetados.
     const lobby = this.lobbyManager.getLobby(matchId);
     if (!lobby) return;
 
-    const allPlayerIds = [
-      ...lobby.teams.ALPHA.map(p => p.oidUser),
-      ...lobby.teams.BRAVO.map(p => p.oidUser)
-    ];
+    // Descobre qual time foi afetado pela troca (swap sempre acontece dentro do mesmo time)
+    const affectedTeam = lobby.teams.ALPHA.some(p => p.oidUser === accepterOidUser)
+      ? 'ALPHA'
+      : 'BRAVO';
 
-    // NOVO: Notifica todos os jogadores sobre a troca completada (para limpar animações)
-    for (const oid of allPlayerIds) {
+    // Pega apenas os jogadores do time afetado
+    const affectedPlayerIds = lobby.teams[affectedTeam].map(p => p.oidUser);
+
+    // ✅ OTIMIZADO: Notifica APENAS os jogadores do time afetado (não todos os 10)
+    for (const oid of affectedPlayerIds) {
       this.sendToPlayer(oid, {
         type: 'LOBBY_SWAP_COMPLETED',
         payload: {
           matchId,
-          swappedPlayers: [accepterOidUser, requestingOidUser]
+          swappedPlayers: [accepterOidUser, requestingOidUser],
+          team: affectedTeam
         }
       });
     }
 
-    // Re-sincroniza o estado da lobby para todos
-    for (const oid of allPlayerIds) {
+    // ✅ OTIMIZADO: Re-sincroniza APENAS o time afetado (não todos os 10 jogadores)
+    for (const oid of affectedPlayerIds) {
       const client = this.clients.get(oid);
       if (client && client.readyState === WebSocket.OPEN) {
         // Re-chama o handleLobbyJoin para este cliente, que enviará LOBBY_DATA atualizado
         await this.handleLobbyJoin(client, { matchId });
       }
     }
+  }
+
+  /**
+   * LOBBY_DECLINE_SWAP - Jogador recusa uma solicitação de troca
+   */
+  private async handleLobbyDeclineSwap(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
+    if (!ws.oidUser) return;
+    const accepterOidUser = ws.oidUser; // Quem recebeu a solicitação e está recusando
+    const { matchId, requestingOidUser } = payload;
+    if (!matchId || !requestingOidUser) return;
+
+    const lobby = this.lobbyManager.getLobby(matchId);
+    if (!lobby) return;
+
+    // Notifica o solicitante que a troca foi recusada
+    this.sendToPlayer(requestingOidUser, {
+      type: 'LOBBY_SWAP_DECLINED',
+      payload: {
+        matchId,
+        declinedBy: accepterOidUser,
+        swappedPlayers: [accepterOidUser, requestingOidUser]
+      }
+    });
+
+    log('debug', `Troca recusada: ${requestingOidUser} → ${accepterOidUser} no match ${matchId}`);
   }
 
   /**
@@ -2034,19 +2095,13 @@ this.readyManager.onReadyFailed(async (
     }
 
     // Se a party estava na fila, remove todos antes de alterar a party
-    await this.removePartyFromQueue(partyId);
+    await this.removePartyFromQueue(partyId, 'member_left');
 
     // Limpa convites pendentes enviados por este jogador (evita bloquear reenvio)
     await this.clearPartyInvitesForUser(ws.oidUser);
 
-    const party = await this.partyManager.removeMember(partyId, ws.oidUser);
-    if (!party) {
-      // Party deletada
-      this.sendMessage(ws, { type: 'PARTY_LEFT', payload: { partyId } });
-      return;
-    }
-    this.sendMessage(ws, { type: 'PARTY_LEFT', payload: { partyId } });
-    this.broadcastPartyUpdate(party);
+    // Remove e notifica com mensagem específica
+    await this.removeFromPartyAndNotify(partyId, ws.oidUser, 'left');
   }
 
   private async handlePartyKick(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
@@ -2063,9 +2118,9 @@ this.readyManager.onReadyFailed(async (
     }
 
     // Se a party estava na fila, remove todos antes de alterar a party
-    await this.removePartyFromQueue(partyId);
+    await this.removePartyFromQueue(partyId, 'member_kicked');
 
-    const updated = await this.partyManager.removeMember(partyId, targetOidUser);
+    // Limpa o par de convite antes de remover
     try {
       const a = Math.min(ws.oidUser, targetOidUser);
       const b = Math.max(ws.oidUser, targetOidUser);
@@ -2073,14 +2128,12 @@ this.readyManager.onReadyFailed(async (
     } catch (err) {
       log('warn', `Falha ao limpar par de convite ao kick (${ws.oidUser}, ${targetOidUser})`, err);
     }
+
+    // Notifica o leader sobre o kick bem-sucedido
     this.sendMessage(ws, { type: 'PARTY_KICKED', payload: { oidUser: targetOidUser } });
-    const targetClient = this.clients.get(targetOidUser);
-    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-      this.sendMessage(targetClient, { type: 'PARTY_KICKED', payload: { oidUser: targetOidUser } });
-    }
-    if (updated) {
-      this.broadcastPartyUpdate(updated);
-    }
+
+    // Remove e notifica com mensagem específica
+    await this.removeFromPartyAndNotify(partyId, targetOidUser, 'kicked', ws.oidUser);
   }
 
   private async handlePartyTransferLead(ws: AuthenticatedWebSocket, payload: any): Promise<void> {
@@ -2133,18 +2186,79 @@ this.readyManager.onReadyFailed(async (
   }
 
   /**
-   * Remove todos os membros da party da fila, caso estejam em matchmaking.
-   * Evita inconsistÍncia quando alguém sai/kicka enquanto a party já estava na fila.
+   * Remove um jogador da party e notifica com mensagens específicas.
+   * Evita duplicação de lógica e garante que as mensagens corretas sejam enviadas.
+   *
+   * @param partyId - ID da party
+   * @param removedOidUser - OidUser do jogador sendo removido
+   * @param reason - Motivo: 'left' (saiu voluntariamente), 'kicked' (foi expulso), 'disbanded' (party foi dissolvida)
+   * @param kickerOidUser - (Opcional) OidUser de quem kickou (apenas para reason='kicked')
    */
-  private async removePartyFromQueue(partyId: string): Promise<void> {
+  private async removeFromPartyAndNotify(
+    partyId: string,
+    removedOidUser: number,
+    reason: 'left' | 'kicked' | 'disbanded',
+    kickerOidUser?: number
+  ): Promise<void> {
+    // Remove do party manager
+    const updatedParty = await this.partyManager.removeMember(partyId, removedOidUser);
+
+    // Determina a mensagem específica para quem foi removido
+    const messageType = reason === 'kicked' ? 'PARTY_KICKED' : 'PARTY_LEFT';
+    const messagePayload = reason === 'kicked'
+      ? { oidUser: removedOidUser, kickedBy: kickerOidUser }
+      : { partyId };
+
+    // Notifica quem foi removido
+    const removedClient = this.clients.get(removedOidUser);
+    if (removedClient && removedClient.readyState === WebSocket.OPEN) {
+      this.sendMessage(removedClient, {
+        type: messageType,
+        payload: messagePayload
+      });
+    }
+
+    // Se a party ainda existe, notifica os membros restantes
+    if (updatedParty) {
+      this.broadcastPartyUpdate(updatedParty);
+    }
+
+    log('info', `Jogador ${removedOidUser} removido da party ${partyId} (razão: ${reason})`);
+  }
+
+  /**
+   * Remove um jogador específico da fila e notifica.
+   * Use este método quando apenas um jogador específico precisa sair.
+   *
+   * @param oidUser - OidUser do jogador a ser removido
+   * @param reason - Razão da remoção (para logging/debugging)
+   */
+  private async removePlayerFromQueue(oidUser: number, reason: string): Promise<void> {
+    if (this.queueManager.isInQueue(oidUser)) {
+      await this.queueManager.removeFromQueue(oidUser);
+      this.sendToPlayer(oidUser, {
+        type: 'QUEUE_LEFT',
+        payload: { reason }
+      });
+      log('info', `Jogador ${oidUser} removido da fila (razão: ${reason})`);
+    }
+  }
+
+  /**
+   * Remove TODOS os membros da party da fila.
+   * Use quando a party inteira precisa sair (ex: party dissolvida, leader saiu).
+   *
+   * @param partyId - ID da party
+   * @param reason - Razão da remoção (para logging/debugging)
+   */
+  private async removePartyFromQueue(partyId: string, reason: string = 'party_changed'): Promise<void> {
     const party = await this.partyManager.getParty(partyId);
     if (!party) return;
 
+    log('info', `Removendo party ${partyId} da fila (razão: ${reason})`);
+
     for (const memberId of party.members) {
-      if (this.queueManager.isInQueue(memberId)) {
-        await this.queueManager.removeFromQueue(memberId);
-        this.sendToPlayer(memberId, { type: 'QUEUE_LEFT' });
-      }
+      await this.removePlayerFromQueue(memberId, reason);
     }
   }
 

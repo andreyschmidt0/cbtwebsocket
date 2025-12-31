@@ -355,15 +355,37 @@ export class HOSTManager {
     }
   }
 
+  /**
+   * Limpa a tentativa de host para um match específico.
+   * Use este método quando um match individual falha ou precisa ser cancelado.
+   */
+  async clearHostAttempt(matchId: string): Promise<void> {
+    const attempt = this.activeHosts.get(matchId)
+    if (!attempt) return
+
+    clearTimeout(attempt.timeout)
+    this.activeHosts.delete(matchId)
+
+    await this.redis.del(`match:${matchId}:host`)
+    await this.redis.del(`match:${matchId}:room`)
+    await this.redis.del(`match:${matchId}:hostPassword`)
+    await this.redis.del(`room:${matchId}`)
+
+    log('info', `Host attempt limpo para match ${matchId}`)
+  }
+
+  /**
+   * Limpa TODAS as tentativas de host.
+   * ⚠️ ATENÇÃO: Use apenas para shutdown do servidor!
+   * Para limpar um match específico, use clearHostAttempt(matchId).
+   */
   async clearAllAttempts(): Promise<void> {
-    for (const [mid, attempt] of this.activeHosts.entries()) {
-      clearTimeout(attempt.timeout)
-      await this.redis.del(`match:${mid}:host`)
-      await this.redis.del(`match:${mid}:room`)
-      await this.redis.del(`match:${mid}:hostPassword`)
-      await this.redis.del(`room:${mid}`)
+    log('warn', 'Limpando TODOS os hosts ativos (shutdown do servidor)')
+
+    for (const matchId of Array.from(this.activeHosts.keys())) {
+      await this.clearHostAttempt(matchId)
     }
-    this.activeHosts.clear()
+
     log('info', 'Todas as tentativas de HOST limpas')
   }
 }

@@ -255,12 +255,34 @@ async handleReady(matchId: string, oidUser: number): Promise<void> {
     return this.activeChecks.has(matchId)
   }
 
+  /**
+   * Limpa o ready check para um match específico.
+   * Use este método quando um match individual precisa ser cancelado.
+   */
+  async clearReadyCheck(matchId: string): Promise<void> {
+    const check = this.activeChecks.get(matchId)
+    if (!check) return
+
+    clearTimeout(check.timeout)
+    this.activeChecks.delete(matchId)
+
+    await this.redis.del(`match:${matchId}:ready`)
+
+    log('info', `Ready check limpo para match ${matchId}`)
+  }
+
+  /**
+   * Limpa TODOS os ready checks ativos.
+   * ⚠️ ATENÇÃO: Use apenas para shutdown do servidor!
+   * Para limpar um match específico, use clearReadyCheck(matchId).
+   */
   async clearAllChecks(): Promise<void> {
-    for (const [mid, check] of this.activeChecks.entries()) {
-      clearTimeout(check.timeout)
-      await this.redis.del(`match:${mid}:ready`)
+    log('warn', 'Limpando TODOS os ready checks (shutdown do servidor)')
+
+    for (const matchId of Array.from(this.activeChecks.keys())) {
+      await this.clearReadyCheck(matchId)
     }
-    this.activeChecks.clear()
+
     log('info', 'Todos os ready checks limpos')
   }
 }
