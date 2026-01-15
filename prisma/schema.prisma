@@ -147,3 +147,4 @@ model BST_Fullmatchlog {
   @@index([IsValid, LogDate])
   @@index([GameMode, IsValid, LogDate])
 }
+

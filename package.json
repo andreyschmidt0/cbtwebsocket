@@ -4,9 +4,9 @@
   "description": "Servidor WebSocket para sistema de lobbies CBT Brasil",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/ranked-websocket-server.ts",
+    "dev": "tsx watch src/social-websocket-server.ts",
     "build": "prisma generate && prisma generate --schema=./prisma/schema-game.prisma && tsc",
-    "start": "node dist/ranked-websocket-server.js",
+    "start": "node dist/social-websocket-server.js",
     "prisma:generate": "prisma generate",
     "prisma:studio": "prisma studio",
     "test": "echo \"No tests yet\" && exit 0"

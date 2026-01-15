@@ -82,3 +82,71 @@ model CBT_UserAuth {
 
   @@map("CBT_UserAuth")
 }
+
+
+// ============================================
+// TORNEIOS (FCA_Torneios)
+// ============================================
+
+model FCA_Torneios {
+  TorneioID       Int       @id
+  NomeTorneio     String    @db.NVarChar(100)
+  LimiteInscritos Int?
+  DataInicio      DateTime?
+  GameMode        Int?
+  GameModeType    Int?
+  Temporada       Int?
+  Status          String?   @db.NVarChar(20)
+  RequerPagamento Int?
+
+  rewards     FCA_Torneios_Rewards[]
+  inscricoes  FCA_Torneios_Inscricoes[]
+
+  @@map("FCA_Torneios")
+}
+
+model FCA_Torneios_Rewards {
+  RewardID          Int     @id @default(autoincrement())
+  TorneioID         Int
+  RankStart         Int
+  RankEnd           Int
+  RewardType        String  @db.VarChar(20)
+  Amount            Decimal? @default(0) @db.Decimal(18,2)
+  ProductID         Int?
+  CustomDescription String? @db.VarChar(100)
+
+  torneio FCA_Torneios @relation(fields: [TorneioID], references: [TorneioID])
+
+  @@map("FCA_Torneios_Rewards")
+}
+
+model FCA_Torneios_Inscricoes {
+  InscricaoID     Int      @id @default(autoincrement())
+  TorneioID       Int
+  StatusInscricao String?  @db.NVarChar(20)
+  LiderOidUser    Int
+  ClanID          Int
+  DataInscricao   DateTime @default(now())
+
+  torneio FCA_Torneios        @relation(fields: [TorneioID], references: [TorneioID], onDelete: Cascade)
+  invites FCA_Torneios_Invites[]
+
+  @@unique([TorneioID, ClanID], map: "UQ__FCA_Torn__B6AD458C0B04A488")
+  @@map("FCA_Torneios_Inscricoes")
+}
+
+model FCA_Torneios_Invites {
+  InviteID     Int       @id @default(autoincrement())
+  InscricaoID  Int
+  oidUser      Int
+  Status       String    @default("Pendente") @db.NVarChar(20)
+  Posicao      Int
+  DataConvite  DateTime  @default(now())
+  DataResposta DateTime?
+
+  inscricao FCA_Torneios_Inscricoes @relation(fields: [InscricaoID], references: [InscricaoID], onDelete: Cascade)
+
+  @@unique([InscricaoID, Posicao], map: "UQ__FCA_Torn__80FAA7BC1D75CDC4")
+  @@unique([InscricaoID, oidUser], map: "UQ__FCA_Torn__F41EE96F47EEBFE2")
+  @@map("FCA_Torneios_Invites")
+}
