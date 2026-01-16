@@ -43,6 +43,7 @@ interface TokenValidationResult {
  */
 export class SocialWebSocketServer {
   private redis = getRedisClient();
+  private subscriber: any;
   private wss: WebSocketServer;
   private clients: Map<number, AuthenticatedWebSocket> = new Map();
   private heartbeatInterval?: NodeJS.Timeout;
@@ -102,9 +103,68 @@ export class SocialWebSocketServer {
 
     // 6. Configurar o Servidor WebSocket
     this.setupWebSocketServer();
+    this.setupRedisSubscriber(); // Configurar subscriber Redis
     this.startHeartbeat();
 
     log('info', 'Social WebSocket Server pronto.');
+  }
+
+  /**
+   * Configurar Redis Subscriber para eventos externos
+   */
+  private async setupRedisSubscriber() {
+    try {
+      this.subscriber = this.redis.duplicate();
+      await this.subscriber.connect();
+      
+      await this.subscriber.subscribe('social:events', (message: string) => {
+        try {
+          const event = JSON.parse(message);
+          this.handleRedisEvent(event);
+        } catch (err) {
+          log('error', 'Erro ao processar evento Redis:', err);
+        }
+      });
+      
+      log('info', '📡 Redis Subscriber conectado e escutando social:events');
+    } catch (err) {
+      log('error', '❌ Falha ao configurar Redis Subscriber:', err);
+    }
+  }
+
+  /**
+   * Processar eventos vindos do Redis (API Next.js -> WebSocket)
+   */
+  private handleRedisEvent(event: { type: string, payload: any }) {
+    log('debug', `Evento Redis recebido: ${event.type}`, event.payload);
+
+    if (event.type === 'TOURNAMENT_INVITE_RECEIVED') {
+      const { targetOidUser } = event.payload;
+      const client = this.clients.get(targetOidUser);
+      
+      if (client && client.readyState === WebSocket.OPEN) {
+        log('info', `Encaminhando convite de torneio para ${targetOidUser}`);
+        this.sendMessage(client, {
+          type: 'TOURNAMENT_INVITE_RECEIVED',
+          payload: event.payload
+        });
+      } else {
+        log('debug', `Alvo ${targetOidUser} offline, convite nao entregue em tempo real.`);
+      }
+    }
+
+    if (event.type === 'TOURNAMENT_INVITE_REMOVED') {
+      const { targetOidUser } = event.payload;
+      const client = this.clients.get(targetOidUser);
+      
+      if (client && client.readyState === WebSocket.OPEN) {
+        log('info', `Notificando remocao de convite para ${targetOidUser}`);
+        this.sendMessage(client, {
+          type: 'TOURNAMENT_INVITE_REMOVED',
+          payload: event.payload
+        });
+      }
+    }
   }
 
   /**
