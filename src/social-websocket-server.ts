@@ -224,6 +224,13 @@ export class SocialWebSocketServer {
         if (socket.readyState === WebSocket.OPEN) {
           try {
             socket.ping();
+            
+            // Renovar presenca no Redis
+            if (socket.oidUser) {
+              this.redis.setEx(`ws:presence:${socket.oidUser}`, 60, '1').catch(err => {
+                log('error', `Erro ao renovar presenca para ${socket.oidUser}`, err);
+              });
+            }
           } catch (error) {
             log('warn', 'Falha ao enviar ping para cliente', error);
           }
@@ -249,6 +256,11 @@ export class SocialWebSocketServer {
         case 'HEARTBEAT':
           ws.isAlive = true;
           this.sendMessage(ws, { type: 'PONG' });
+          
+          // Renovar presenca no Redis ao receber heartbeat
+          if (ws.oidUser) {
+            this.redis.setEx(`ws:presence:${ws.oidUser}`, 60, '1').catch(() => {});
+          }
           break;
 
         // === FRIENDS ===
@@ -430,6 +442,11 @@ export class SocialWebSocketServer {
     this.clients.set(oidUser, ws);
     log('info', `${ws.username} (${oidUser}) autenticado. Conexoes ativas: ${this.clients.size}`);
 
+    // Registrar presenca no Redis
+    await this.redis.setEx(`ws:presence:${oidUser}`, 60, '1').catch(err => {
+      log('error', `Erro ao registrar presenca para ${oidUser}`, err);
+    });
+
     this.sendMessage(ws, {
       type: 'AUTH_SUCCESS',
       payload: { oidUser, username: ws.username }
@@ -485,6 +502,9 @@ export class SocialWebSocketServer {
       if (currentConnection === ws) {
         this.clients.delete(ws.oidUser);
         log('info', `${ws.username || ws.oidUser} desconectado. Conexoes ativas: ${this.clients.size}`);
+        
+        // Remover presenca do Redis
+        this.redis.del(`ws:presence:${ws.oidUser}`).catch(() => {});
       } else {
         log('debug', `Conexao antiga de ${ws.oidUser} fechada (ja foi substituida)`);
       }
