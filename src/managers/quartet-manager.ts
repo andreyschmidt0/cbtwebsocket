@@ -227,6 +227,14 @@ export class QuartetManager {
         WHERE requesterOidUser = ${requesterOidUser} AND targetOidUser = ${targetOidUser} AND status = 'PENDING'
       `
       if (!updated) return { ok: false, reason: 'NOT_FOUND' }
+
+      // Clean up invites sent by the user who just accepted an invite
+      // If I accept an invite to join a team, I should not have pending invites sent to others
+      await prismaRanked.$executeRaw`
+        DELETE FROM BST_QuartetInvites
+        WHERE requesterOidUser = ${targetOidUser} AND status IN ('PENDING', 'ACCEPTED')
+      `
+
       return { ok: true }
     } catch (err) {
       log('error', 'Erro ao aceitar convite de quarteto', err)
