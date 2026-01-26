@@ -1,6 +1,8 @@
 import { PrismaClient as PrismaClientRanked } from '@prisma/client'
-import { PrismaClient as PrismaClientGame } from '../../node_modules/.prisma/client-game'
+import { PrismaClient as PrismaClientGame, Prisma as PrismaNamespaceGame } from '../../node_modules/.prisma/client-game'
 import { log } from '../utils/logger'
+
+export const PrismaGame = PrismaNamespaceGame;
 
 // ============================================
 // CLIENTE PRISMA - BANCO COMBATARMS_LOG (Ranked)

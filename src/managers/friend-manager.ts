@@ -1,4 +1,5 @@
-import { prismaRanked, prismaGame } from '../database/prisma'
+import { prismaRanked, prismaGame, PrismaGame } from '../database/prisma'
+import { Prisma } from '@prisma/client'
 import { log } from '../utils/logger'
 
 type FriendStatus = 'PENDING' | 'ACCEPTED' | 'REMOVED' | 'BLOCKED'
@@ -153,9 +154,9 @@ export class FriendManager {
       const users =
         ids.length > 0
           ? await withTimeout(
-              prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-                `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')})`
-              )
+              prismaGame.$queryRaw<{ oiduser: number; NickName: string | null }[]>`
+                SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${PrismaGame.join(ids)})
+              `
             )
           : []
       const nameById = new Map<number, string | null>(users.map(u => [u.oiduser, u.NickName]))
@@ -189,9 +190,9 @@ export class FriendManager {
       const users =
         ids.length > 0
           ? await withTimeout(
-              prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-                `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')})`
-              )
+              prismaGame.$queryRaw<{ oiduser: number; NickName: string | null }[]>`
+                SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${PrismaGame.join(ids)})
+              `
             )
           : []
       const nameById = new Map<number, string | null>(users.map(u => [u.oiduser, u.NickName]))

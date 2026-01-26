@@ -1,4 +1,4 @@
-import { prismaRanked, prismaGame } from '../database/prisma'
+import { prismaRanked, prismaGame, PrismaGame } from '../database/prisma'
 import { log } from '../utils/logger'
 
 /**
@@ -343,9 +343,9 @@ export class QuartetManager {
 
         // Buscar usernames de todos os membros
         const users = await withTimeout(
-          prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-            `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${memberIds.join(',')}) AND NickName IS NOT NULL`
-          )
+          prismaGame.$queryRaw<{ oiduser: number; NickName: string | null }[]>`
+            SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${PrismaGame.join(memberIds)}) AND NickName IS NOT NULL
+          `
         )
 
         const nameById = new Map<number, string>(
@@ -396,9 +396,9 @@ export class QuartetManager {
       const users =
         ids.length > 0
           ? await withTimeout(
-              prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-                `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')}) AND NickName IS NOT NULL`
-              )
+              prismaGame.$queryRaw<{ oiduser: number; NickName: string | null }[]>`
+                SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${PrismaGame.join(ids)}) AND NickName IS NOT NULL
+              `
             )
           : []
 
@@ -458,9 +458,9 @@ export class QuartetManager {
       const users =
         ids.length > 0
           ? await withTimeout(
-              prismaGame.$queryRawUnsafe<{ oiduser: number; NickName: string | null }[]>(
-                `SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${ids.join(',')}) AND NickName IS NOT NULL`
-              )
+              prismaGame.$queryRaw<{ oiduser: number; NickName: string | null }[]>`
+                SELECT oiduser, NickName FROM CBT_User WHERE oiduser IN (${PrismaGame.join(ids)}) AND NickName IS NOT NULL
+              `
             )
           : []
 
