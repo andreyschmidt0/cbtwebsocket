@@ -165,6 +165,19 @@ export class SocialWebSocketServer {
         });
       }
     }
+
+    if (event.type === 'USER_NOTIFICATION') {
+      const { targetOidUser } = event.payload;
+      const client = this.clients.get(Number(targetOidUser));
+      
+      if (client && client.readyState === WebSocket.OPEN) {
+        log('info', `Encaminhando notificacao global para ${targetOidUser}`);
+        this.sendMessage(client, {
+          type: 'NOTIFICATION_RECEIVED',
+          payload: event.payload
+        });
+      }
+    }
   }
 
   /**
@@ -381,7 +394,8 @@ export class SocialWebSocketServer {
     }
 
     // Validar token
-    const tokenValidation = await this.validateAuthToken({ token, oidUser });
+    const numericOidUser = Number(oidUser);
+    const tokenValidation = await this.validateAuthToken({ token, oidUser: numericOidUser });
     if (!tokenValidation.valid) {
       log('warn', `Token invalido para oidUser=${oidUser} (${tokenValidation.reason || 'UNKNOWN'})`);
       this.sendMessage(ws, {
@@ -395,14 +409,14 @@ export class SocialWebSocketServer {
     }
 
     // TAB REPLACEMENT: Se ja existe conexao, fechar a antiga e usar a nova
-    const existingConnection = this.clients.get(oidUser);
+    const existingConnection = this.clients.get(numericOidUser);
     if (existingConnection && existingConnection.readyState === WebSocket.OPEN) {
       // Verifica se é a mesma aba reconectando
       if (existingConnection.tabId && tabId && existingConnection.tabId === tabId) {
-        log('info', `[RECONNECT] Mesma aba reconectando para oidUser=${oidUser} (tabId=${tabId})`);
+        log('info', `[RECONNECT] Mesma aba reconectando para oidUser=${numericOidUser} (tabId=${tabId})`);
         existingConnection.close();
       } else {
-        log('info', `[TAB_REPLACEMENT] Substituindo conexao antiga de oidUser=${oidUser}`);
+        log('info', `[TAB_REPLACEMENT] Substituindo conexao antiga de oidUser=${numericOidUser}`);
 
         // Notificar a aba antiga que ela foi substituida
         this.sendMessage(existingConnection, {
@@ -418,38 +432,39 @@ export class SocialWebSocketServer {
       }
     }
 
-    ws.oidUser = oidUser;
+    ws.oidUser = numericOidUser;
     ws.tabId = tabId;
 
     // Busca NickName real do banco de dados
     try {
       const user = await prismaGame.$queryRaw<any[]>`
-        SELECT NickName FROM CBT_User WHERE oiduser = ${oidUser}
+        SELECT NickName FROM CBT_User WHERE oiduser = ${numericOidUser}
       `;
 
       if (user && user.length > 0 && user[0].NickName) {
         ws.username = user[0].NickName;
         log('debug', `Username validado do banco: ${ws.username}`);
       } else {
-        log('warn', `NickName nao encontrado no banco para ${oidUser}, usando fallback`);
-        ws.username = username || `Player${oidUser}`;
+        log('warn', `NickName nao encontrado no banco para ${numericOidUser}, usando fallback`);
+        ws.username = username || `Player${numericOidUser}`;
       }
     } catch (error) {
-      log('warn', `Erro ao buscar NickName do banco para ${oidUser}, usando fallback:`, error);
-      ws.username = username || `Player${oidUser}`;
+      log('warn', `Erro ao buscar NickName do banco para ${numericOidUser}, usando fallback:`, error);
+      ws.username = username || `Player${numericOidUser}`;
     }
 
-    this.clients.set(oidUser, ws);
-    log('info', `${ws.username} (${oidUser}) autenticado. Conexoes ativas: ${this.clients.size}`);
+    this.clients.set(numericOidUser, ws);
+    console.log(`[AUTH-DEBUG] Cliente registrado no Map: Key=${numericOidUser} (Type: ${typeof numericOidUser}) | Total Clients: ${this.clients.size}`);
+    log('info', `${ws.username} (${numericOidUser}) autenticado. Conexoes ativas: ${this.clients.size}`);
 
     // Registrar presenca no Redis
-    await this.redis.setEx(`ws:presence:${oidUser}`, 60, '1').catch(err => {
-      log('error', `Erro ao registrar presenca para ${oidUser}`, err);
+    await this.redis.setEx(`ws:presence:${numericOidUser}`, 60, '1').catch(err => {
+      log('error', `Erro ao registrar presenca para ${numericOidUser}`, err);
     });
 
     this.sendMessage(ws, {
       type: 'AUTH_SUCCESS',
-      payload: { oidUser, username: ws.username }
+      payload: { oidUser: numericOidUser, username: ws.username }
     });
 
     // Reenvia estado de party (suporte a F5/reconexao)
