@@ -6,6 +6,7 @@ import { FriendManager } from './managers/friend-manager';
 import { PartyManager } from './managers/party-manager';
 import { QuartetManager } from './managers/quartet-manager';
 import { TournamentInviteManager } from './managers/tournament-invite-manager';
+import { PaymentManager } from './managers/payment-manager';
 import { prismaGame } from './database/prisma';
 import { log } from './utils/logger';
 import { getRedisClient } from './database/redis-client';
@@ -53,6 +54,7 @@ export class SocialWebSocketServer {
   private partyManager: PartyManager;
   private quartetManager: QuartetManager;
   private tournamentInviteManager: TournamentInviteManager;
+  private paymentManager: PaymentManager;
 
   // Servidor HTTP e App Express
   private app: express.Express;
@@ -100,6 +102,7 @@ export class SocialWebSocketServer {
     this.partyManager = new PartyManager();
     this.quartetManager = new QuartetManager();
     this.tournamentInviteManager = new TournamentInviteManager();
+    this.paymentManager = new PaymentManager();
 
     // 6. Configurar o Servidor WebSocket
     this.setupWebSocketServer();
@@ -117,6 +120,7 @@ export class SocialWebSocketServer {
       this.subscriber = this.redis.duplicate();
       await this.subscriber.connect();
       
+      // Subscreve a eventos sociais
       await this.subscriber.subscribe('social:events', (message: string) => {
         try {
           const event = JSON.parse(message);
@@ -125,8 +129,21 @@ export class SocialWebSocketServer {
           log('error', 'Erro ao processar evento Redis:', err);
         }
       });
+
+      // Subscreve a eventos de pagamento
+      await this.subscriber.subscribe('payment:events', (message: string) => {
+        try {
+          const event = JSON.parse(message);
+          if (event.type === 'PAYMENT_CONFIRMED') {
+            const { transactionId, ...rest } = event.payload;
+            this.paymentManager.notifyPaymentConfirmed(transactionId, rest);
+          }
+        } catch (err) {
+          log('error', 'Erro ao processar evento de pagamento Redis:', err);
+        }
+      });
       
-      log('info', '📡 Redis Subscriber conectado e escutando social:events');
+      log('info', '📡 Redis Subscriber conectado (social:events, payment:events)');
     } catch (err) {
       log('error', '❌ Falha ao configurar Redis Subscriber:', err);
     }
@@ -354,6 +371,13 @@ export class SocialWebSocketServer {
           break;
         case 'TOURNAMENT_INVITE_LIST':
           await this.handleTournamentInviteList(ws);
+          break;
+
+        // === PAYMENT ===
+        case 'PAYMENT_WATCH':
+          if (payload?.transactionId) {
+            this.paymentManager.watchTransaction(ws, payload.transactionId);
+          }
           break;
 
         default:
