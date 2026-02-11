@@ -135,8 +135,17 @@ export class SocialWebSocketServer {
         try {
           const event = JSON.parse(message);
           if (event.type === 'PAYMENT_CONFIRMED') {
-            const { transactionId, ...rest } = event.payload;
-            this.paymentManager.notifyPaymentConfirmed(transactionId, rest);
+            const { transactionId, externalId, ...rest } = event.payload;
+            
+            // Notifica usando o ID da Misticpay (transactionId)
+            if (transactionId) {
+              this.paymentManager.notifyPaymentConfirmed(transactionId.toString(), rest);
+            }
+            
+            // Notifica usando o nosso ID (externalId) caso o front esteja assistindo ele
+            if (externalId && externalId !== transactionId) {
+              this.paymentManager.notifyPaymentConfirmed(externalId.toString(), rest);
+            }
           }
         } catch (err) {
           log('error', 'Erro ao processar evento de pagamento Redis:', err);
