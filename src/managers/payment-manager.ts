@@ -1,11 +1,6 @@
 import { WebSocket } from 'ws';
 import { log } from '../utils/logger';
 
-interface PaymentWatcher {
-  socket: WebSocket;
-  transactionId: string;
-}
-
 export class PaymentManager {
   // Map<transactionId, Set<WebSocket>>
   private watchers: Map<string, Set<WebSocket>> = new Map();

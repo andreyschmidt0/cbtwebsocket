@@ -1,5 +1,4 @@
 import { prismaRanked, prismaGame, PrismaGame } from '../database/prisma'
-import { Prisma } from '@prisma/client'
 import { log } from '../utils/logger'
 
 type FriendStatus = 'PENDING' | 'ACCEPTED' | 'REMOVED' | 'BLOCKED'
