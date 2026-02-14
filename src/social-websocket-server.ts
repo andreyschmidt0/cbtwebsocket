@@ -204,6 +204,32 @@ export class SocialWebSocketServer {
         });
       }
     }
+
+    if (event.type === 'MATCH_CHAT_UPDATE') {
+      const { recipients, matchId, senderOidUser, message, isProposta } = event.payload;
+      
+      // log('debug', `[WS-CHAT] Recebido evento para Match #${matchId} de ${senderOidUser}`);
+      // log('debug', `[WS-CHAT] Destinatários:`, recipients);
+
+      if (Array.isArray(recipients)) {
+        recipients.forEach((targetId: number) => {
+          const client = this.clients.get(Number(targetId));
+          const isConnected = client && client.readyState === WebSocket.OPEN;
+          
+          // log('debug', `[WS-CHAT] Tentando enviar para ${targetId}. Conectado? ${isConnected}`);
+
+          if (isConnected && client) {
+             this.sendMessage(client, {
+               type: 'MATCH_CHAT_UPDATE',
+               payload: { matchId, senderOidUser, message, isProposta }
+             });
+             // log('debug', `[WS-CHAT] Enviado com sucesso para ${targetId}`);
+          }
+        });
+      } else {
+         log('warn', `[WS-CHAT] Recipients nao é array`, recipients);
+      }
+    }
   }
 
   /**

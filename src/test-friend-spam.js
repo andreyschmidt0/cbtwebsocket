@@ -5,7 +5,7 @@
 const WebSocket = require('ws');
 
 const WS_URL = process.env.WS_URL || 'ws://localhost:3001';
-const TARGETS = [16271, 7662]; // ids que receberão os convites
+const TARGETS = [2, 7662]; // ids que receberão os convites
 
 // Cria até 10 bots com oidUser/username distintos
 const bots = Array.from({ length: 10 }, (_, i) => ({
