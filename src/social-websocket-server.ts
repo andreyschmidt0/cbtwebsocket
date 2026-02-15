@@ -230,6 +230,18 @@ export class SocialWebSocketServer {
          log('warn', `[WS-CHAT] Recipients nao é array`, recipients);
       }
     }
+
+    if (event.type === 'TOURNAMENT_DRAW_UPDATE') {
+      log('info', `[WS-DRAW] Retransmitindo sorteio para todos os clientes: ${event.payload.action}`);
+      this.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          this.sendMessage(client, {
+            type: 'TOURNAMENT_DRAW_UPDATE',
+            payload: event.payload
+          });
+        }
+      });
+    }
   }
 
   /**
