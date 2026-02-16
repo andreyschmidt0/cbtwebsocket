@@ -117,7 +117,19 @@ export class SocialWebSocketServer {
    */
   private async setupRedisSubscriber() {
     try {
+      // Se ja existir um subscriber conectado, desconecta antes de criar um novo
+      if (this.subscriber) {
+        try {
+          await this.subscriber.disconnect();
+        } catch (e) {}
+      }
+
       this.subscriber = this.redis.duplicate();
+      
+      this.subscriber.on('error', (err: any) => {
+        log('error', '❌ Redis Subscriber Error:', err);
+      });
+
       await this.subscriber.connect();
       
       // Subscreve a eventos sociais
@@ -154,7 +166,8 @@ export class SocialWebSocketServer {
       
       log('info', '📡 Redis Subscriber conectado (social:events, payment:events)');
     } catch (err) {
-      log('error', '❌ Falha ao configurar Redis Subscriber:', err);
+      log('error', '❌ Falha ao configurar Redis Subscriber. Tentando novamente em 5s...', err);
+      setTimeout(() => this.setupRedisSubscriber(), 5000);
     }
   }
 
@@ -206,28 +219,51 @@ export class SocialWebSocketServer {
     }
 
     if (event.type === 'MATCH_CHAT_UPDATE') {
-      const { recipients, matchId, senderOidUser, message, isProposta } = event.payload;
+      const { recipients, ...payload } = event.payload;
       
-      // log('debug', `[WS-CHAT] Recebido evento para Match #${matchId} de ${senderOidUser}`);
-      // log('debug', `[WS-CHAT] Destinatários:`, recipients);
-
       if (Array.isArray(recipients)) {
         recipients.forEach((targetId: number) => {
           const client = this.clients.get(Number(targetId));
           const isConnected = client && client.readyState === WebSocket.OPEN;
           
-          // log('debug', `[WS-CHAT] Tentando enviar para ${targetId}. Conectado? ${isConnected}`);
-
           if (isConnected && client) {
              this.sendMessage(client, {
-               type: 'MATCH_CHAT_UPDATE',
-               payload: { matchId, senderOidUser, message, isProposta }
+               type: 'MATCH_CHAT_MESSAGE_RECEIVED',
+               payload: payload
              });
-             // log('debug', `[WS-CHAT] Enviado com sucesso para ${targetId}`);
           }
         });
-      } else {
-         log('warn', `[WS-CHAT] Recipients nao é array`, recipients);
+      }
+    }
+
+    if (event.type === 'MATCH_STATUS_UPDATE' || event.type === 'MATCH_EXCEPTION_UPDATE') {
+      const { recipients, ...payload } = event.payload;
+      
+      // Suporte a Broadcast Global para todos os usuários conectados
+      if (recipients === 'ALL') {
+        log('info', `[WS-MATCH] Broadcast global para ${event.type}`);
+        this.clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            this.sendMessage(client, {
+              type: event.type,
+              payload: payload
+            });
+          }
+        });
+        return;
+      }
+
+      // Encaminhamento para destinatários específicos
+      if (Array.isArray(recipients)) {
+        recipients.forEach((targetId: number) => {
+          const client = this.clients.get(Number(targetId));
+          if (client && client.readyState === WebSocket.OPEN) {
+            this.sendMessage(client, {
+              type: event.type,
+              payload: payload
+            });
+          }
+        });
       }
     }
 
