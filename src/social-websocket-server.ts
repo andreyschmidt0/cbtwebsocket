@@ -9,6 +9,7 @@ import { TournamentInviteManager } from './managers/tournament-invite-manager';
 import { PaymentManager } from './managers/payment-manager';
 import { prismaGame } from './database/prisma';
 import { log } from './utils/logger';
+import { toBrasiliaISOWithOffset } from './lib/time';
 import { getRedisClient } from './database/redis-client';
 
 /**
@@ -89,7 +90,7 @@ export class SocialWebSocketServer {
     this.app.get('/health', (_req, res) => {
       res.status(200).json({
         status: 'ok',
-        timestamp: new Date().toISOString(),
+        timestamp: toBrasiliaISOWithOffset(new Date()),
         service: 'social-websocket'
       });
     });

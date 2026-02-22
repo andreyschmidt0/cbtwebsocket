@@ -1,5 +1,6 @@
 import { log } from '../utils/logger';
 import { prismaGame, prismaRanked } from '../database/prisma';
+import { toBrasiliaForDb } from '../lib/time';
 
 /**
  * Tipos para o sistema de convites de torneio
@@ -288,9 +289,10 @@ export class TournamentInviteManager {
       }
 
       // 2. Atualizar status do convite
+      const nowForDb = toBrasiliaForDb(new Date());
       await prismaRanked.$executeRaw`
         UPDATE COMBATARMS.dbo.FCA_Torneios_Invites
-        SET Status = 'Aceito', DataResposta = GETDATE()
+        SET Status = 'Aceito', DataResposta = ${nowForDb}
         WHERE InviteID = ${inviteId}
       `;
 
@@ -321,9 +323,10 @@ export class TournamentInviteManager {
       }
 
       // 2. Atualizar status do convite
+      const nowForDb = toBrasiliaForDb(new Date());
       await prismaRanked.$executeRaw`
         UPDATE COMBATARMS.dbo.FCA_Torneios_Invites
-        SET Status = 'Recusado', DataResposta = GETDATE()
+        SET Status = 'Recusado', DataResposta = ${nowForDb}
         WHERE InviteID = ${inviteId}
       `;
 

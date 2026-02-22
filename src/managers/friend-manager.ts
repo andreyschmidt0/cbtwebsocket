@@ -1,5 +1,6 @@
 import { prismaRanked, prismaGame, PrismaGame } from '../database/prisma'
 import { log } from '../utils/logger'
+import { toBrasiliaForDb } from '../lib/time'
 
 type FriendStatus = 'PENDING' | 'ACCEPTED' | 'REMOVED' | 'BLOCKED'
 
@@ -41,6 +42,7 @@ export class FriendManager {
     }
 
     try {
+      const nowForDb = toBrasiliaForDb(new Date())
       // Verifica se já existe algum vínculo entre os dois (em qualquer direção)
       const existing = await prismaRanked.$queryRaw<FriendRecord[]>`
         SELECT TOP 1 requesterId, targetId, status, createdAt, updatedAt
@@ -61,7 +63,7 @@ export class FriendManager {
           if (row.requesterId === targetId && row.targetId === requesterId) {
             await prismaRanked.$executeRaw`
               UPDATE BST_Friends
-              SET status = 'ACCEPTED', updatedAt = GETDATE()
+              SET status = 'ACCEPTED', updatedAt = ${nowForDb}
               WHERE requesterId = ${targetId} AND targetId = ${requesterId} AND status = 'PENDING'
             `
             return { ok: true }
@@ -82,7 +84,7 @@ export class FriendManager {
 
       await prismaRanked.$executeRaw`
         INSERT INTO BST_Friends (requesterId, targetId, status, createdAt, updatedAt)
-        VALUES (${requesterId}, ${targetId}, 'PENDING', GETDATE(), GETDATE())
+        VALUES (${requesterId}, ${targetId}, 'PENDING', ${nowForDb}, ${nowForDb})
       `
       return { ok: true }
     } catch (err) {
@@ -93,9 +95,10 @@ export class FriendManager {
 
   async accept(requesterId: number, targetId: number): Promise<{ ok: boolean; reason?: string }> {
     try {
+      const nowForDb = toBrasiliaForDb(new Date())
       const updated = await prismaRanked.$executeRaw`
         UPDATE BST_Friends
-        SET status = 'ACCEPTED', updatedAt = GETDATE()
+        SET status = 'ACCEPTED', updatedAt = ${nowForDb}
         WHERE requesterId = ${requesterId} AND targetId = ${targetId} AND status = 'PENDING'
       `
       // $executeRaw retorna "number" em prisma; tratamos falsy
@@ -109,9 +112,10 @@ export class FriendManager {
 
   async reject(requesterId: number, targetId: number): Promise<{ ok: boolean; reason?: string }> {
     try {
+      const nowForDb = toBrasiliaForDb(new Date())
       const updated = await prismaRanked.$executeRaw`
         UPDATE BST_Friends
-        SET status = 'REMOVED', updatedAt = GETDATE()
+        SET status = 'REMOVED', updatedAt = ${nowForDb}
         WHERE requesterId = ${requesterId} AND targetId = ${targetId} AND status = 'PENDING'
       `
       if (!updated) return { ok: false, reason: 'NOT_FOUND' }
@@ -124,9 +128,10 @@ export class FriendManager {
 
   async remove(userA: number, userB: number): Promise<{ ok: boolean; reason?: string }> {
     try {
+      const nowForDb = toBrasiliaForDb(new Date())
       const updated = await prismaRanked.$executeRaw`
         UPDATE BST_Friends
-        SET status = 'REMOVED', updatedAt = GETDATE()
+        SET status = 'REMOVED', updatedAt = ${nowForDb}
         WHERE status = 'ACCEPTED' AND (
           (requesterId = ${userA} AND targetId = ${userB}) OR
           (requesterId = ${userB} AND targetId = ${userA})

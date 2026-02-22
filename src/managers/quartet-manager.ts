@@ -1,5 +1,6 @@
 import { prismaRanked, prismaGame, PrismaGame } from '../database/prisma'
 import { log } from '../utils/logger'
+import { toBrasiliaForDb } from '../lib/time'
 
 /**
  * Wrapper para adicionar timeout em queries do Prisma
@@ -152,9 +153,10 @@ export class QuartetManager {
         if (row.status === 'PENDING') {
           // Se o alvo já tinha enviado antes, considerar aceitar direto
           if (row.requesterOidUser === targetOidUser && row.targetOidUser === requesterOidUser) {
+            const nowForDb = toBrasiliaForDb(new Date())
             await prismaRanked.$executeRaw`
               UPDATE BST_QuartetInvites
-              SET status = 'ACCEPTED', updatedAt = GETDATE(), targetPos = COALESCE(targetPos, ${normalizedTargetPos})
+              SET status = 'ACCEPTED', updatedAt = ${nowForDb}, targetPos = COALESCE(targetPos, ${normalizedTargetPos})
               WHERE requesterOidUser = ${targetOidUser} AND targetOidUser = ${requesterOidUser} AND status = 'PENDING'
             `
             return { ok: true }
@@ -173,9 +175,10 @@ export class QuartetManager {
         )
       `
 
+      const nowForDb = toBrasiliaForDb(new Date())
       await prismaRanked.$executeRaw`
         INSERT INTO BST_QuartetInvites (requesterOidUser, targetOidUser, status, targetPos, createdAt, updatedAt)
-        VALUES (${requesterOidUser}, ${targetOidUser}, 'PENDING', ${normalizedTargetPos}, GETDATE(), GETDATE())
+        VALUES (${requesterOidUser}, ${targetOidUser}, 'PENDING', ${normalizedTargetPos}, ${nowForDb}, ${nowForDb})
       `
       return { ok: true }
     } catch (err) {
@@ -221,9 +224,10 @@ export class QuartetManager {
         }
       }
 
+      const nowForDb = toBrasiliaForDb(new Date())
       const updated = await prismaRanked.$executeRaw`
         UPDATE BST_QuartetInvites
-        SET status = 'ACCEPTED', updatedAt = GETDATE()
+        SET status = 'ACCEPTED', updatedAt = ${nowForDb}
         WHERE requesterOidUser = ${requesterOidUser} AND targetOidUser = ${targetOidUser} AND status = 'PENDING'
       `
       if (!updated) return { ok: false, reason: 'NOT_FOUND' }
@@ -247,9 +251,10 @@ export class QuartetManager {
    */
   async rejectInvite(requesterOidUser: number, targetOidUser: number): Promise<{ ok: boolean; reason?: string }> {
     try {
+      const nowForDb = toBrasiliaForDb(new Date())
       const updated = await prismaRanked.$executeRaw`
         UPDATE BST_QuartetInvites
-        SET status = 'REJECTED', updatedAt = GETDATE()
+        SET status = 'REJECTED', updatedAt = ${nowForDb}
         WHERE requesterOidUser = ${requesterOidUser} AND targetOidUser = ${targetOidUser} AND status = 'PENDING'
       `
       if (!updated) return { ok: false, reason: 'NOT_FOUND' }
@@ -266,9 +271,10 @@ export class QuartetManager {
   async removeInvite(userA: number, userB: number): Promise<{ ok: boolean; reason?: string }> {
     try {
       // Segurança: apenas o REQUESTER (capitão) pode remover convites aceitos/pendentes.
+      const nowForDb = toBrasiliaForDb(new Date())
       const updated = await prismaRanked.$executeRaw`
         UPDATE BST_QuartetInvites
-        SET status = 'REMOVED', updatedAt = GETDATE()
+        SET status = 'REMOVED', updatedAt = ${nowForDb}
         WHERE status IN ('ACCEPTED', 'PENDING')
           AND requesterOidUser = ${userA}
           AND targetOidUser = ${userB}
