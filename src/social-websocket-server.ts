@@ -268,6 +268,19 @@ export class SocialWebSocketServer {
       }
     }
 
+    if (event.type === 'MATCH_VETO_UPDATE') {
+      const { recipients, ...payload } = event.payload;
+      log('info', `[WS-VETO] Broadcast veto update para matchId: ${payload.matchId}`);
+      this.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          this.sendMessage(client, {
+            type: 'MATCH_VETO_UPDATE',
+            payload: payload
+          });
+        }
+      });
+    }
+
     if (event.type === 'TOURNAMENT_DRAW_UPDATE') {
       log('info', `[WS-DRAW] Retransmitindo sorteio para todos os clientes: ${event.payload.action}`);
       this.clients.forEach((client) => {
