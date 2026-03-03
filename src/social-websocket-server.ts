@@ -221,12 +221,26 @@ export class SocialWebSocketServer {
 
     if (event.type === 'MATCH_CHAT_UPDATE') {
       const { recipients, ...payload } = event.payload;
-      
+
+      // Broadcast global: chat atualizado (ex: veto/pick) — todos devem refetch
+      if (recipients === 'ALL') {
+        log('info', `[WS-CHAT] Broadcast global para matchId: ${payload.matchId}`);
+        this.clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            this.sendMessage(client, {
+              type: 'MATCH_CHAT_UPDATE',
+              payload: payload
+            });
+          }
+        });
+        return;
+      }
+
       if (Array.isArray(recipients)) {
         recipients.forEach((targetId: number) => {
           const client = this.clients.get(Number(targetId));
           const isConnected = client && client.readyState === WebSocket.OPEN;
-          
+
           if (isConnected && client) {
              this.sendMessage(client, {
                type: 'MATCH_CHAT_MESSAGE_RECEIVED',
