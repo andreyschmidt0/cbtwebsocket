@@ -24,8 +24,8 @@ class RedisClientSingleton {
       this.instance = createClient({
         url: process.env.REDIS_URL || 'redis://localhost:6379',
         socket: {
-          keepAlive: 30000, // Envia sinais de vida a cada 30s
-          reconnectStrategy: (retries) => {
+          keepAlive: true, // Habilita sinais de vida TCP
+          reconnectStrategy: (retries: number) => {
             const delay = Math.min(retries * 100, 3000); // Tenta reconectar rápido (max 3s)
             log('warn', `🔄 Redis tentando reconexão TCP (tentativa ${retries}) em ${delay}ms...`);
             return delay;
