@@ -23,6 +23,7 @@ export function toBrasiliaISOWithOffset(dateInput?: string | Date): string {
   } else {
     dt = DateTime.fromJSDate(dateInput, { zone: 'utc' });
   }
-  return dt.setZone('America/Sao_Paulo').toISO({ suppressMilliseconds: true, includeOffset: true });
+  const iso = dt.setZone('America/Sao_Paulo').toISO({ suppressMilliseconds: true, includeOffset: true });
+  return iso ?? '';
 }
 
